@@ -1,0 +1,941 @@
+type DictionaryShape = {
+  app: { name: string; tagline: string };
+  nav: {
+    dashboard: string;
+    videos: string;
+    chat: string;
+    integrations: string;
+    import: string;
+    logs: string;
+    settings: string;
+  };
+  logs: {
+    title: string;
+    subtitle: string;
+    refresh: string;
+    liveOn: string;
+    liveOff: string;
+    clearAll: string;
+    confirmClear: string;
+    clickToClear: string;
+    levelAll: string;
+    sourceAll: string;
+    searchPlaceholder: string;
+    empty: string;
+    loading: string;
+    kpi: {
+      total: string;
+      error: string;
+      warn: string;
+      info: string;
+      debug: string;
+    };
+  };
+  banner: { connectTitle: string; connectDesc: string; connectCta: string };
+  dashboard: {
+    title: string;
+    subtitle: string;
+    noData: string;
+    emptyTitle: string;
+    summaryTitle: string;
+    summaryDesc: string;
+    kpi: { subscribers: string; views: string; videos: string; avgViews: string };
+    channelDetails: string;
+    topByViews: string;
+    topByViewsDesc: string;
+    topByEngagement: string;
+    topByEngagementDesc: string;
+    deeper: string;
+    deeperDesc: string;
+    bottomByViews: string;
+    bottomByViewsDesc: string;
+    outliers: string;
+    outliersDesc: string;
+    monthly: string;
+    monthlyDesc: string;
+    monthlyCountSuffix: string;
+  };
+  videos: {
+    title: string;
+    subtitle: string;
+    empty: string;
+    search: string;
+    sortLabel: string;
+    durationLabel: string;
+    countFound: string;
+    sort: {
+      recent: string;
+      oldest: string;
+      views: string;
+      likes: string;
+      comments: string;
+      engagement: string;
+    };
+    duration: { all: string; long: string; short: string };
+  };
+  videoDetail: {
+    openOnYouTube: string;
+    views: string;
+    likes: string;
+    comments: string;
+    engagementRate: string;
+    avgViewsPerDay: string;
+    askClaudeTitle: string;
+    askClaudeHint: string;
+    attachToChat: string;
+    tabOverview: string;
+    tabTranscript: string;
+    tabComments: string;
+    soon: string;
+    description: string;
+    noDescription: string;
+    noTranscript: string;
+    searchTranscript: string;
+    copy: string;
+    copied: string;
+    commentsComingSoon: string;
+    transcribeBtn: string;
+    transcribeHint: string;
+    transcribing: string;
+    reTranscribe: string;
+    reTranscribeHint: string;
+    reTranscribeConfirm: string;
+    deepgramNotConfigured: string;
+    openIntegrations: string;
+  };
+  channel: {
+    backToDashboard: string;
+    emptyTitle: string;
+    emptyDesc: string;
+    unknownTitle: string;
+    openOnYouTube: string;
+    aboutTitle: string;
+    aboutDesc: string;
+    showMore: string;
+    showLess: string;
+    noDescription: string;
+    metaTitle: string;
+    channelId: string;
+    handleLabel: string;
+    importedAt: string;
+    engagementTitle: string;
+    engagementDesc: string;
+    totalLikes: string;
+    totalComments: string;
+    engagementRate: string;
+    importedVideos: string;
+    // ----- Deep analytics sections -----
+    performanceTitle: string;
+    performanceDesc: string;
+    perfMin: string;
+    perfP25: string;
+    perfMedian: string;
+    perfP75: string;
+    perfMax: string;
+    perfStdev: string;
+    perfAboveMedian: string;
+    perfTopViral: string;
+    perfTopViralHint: string;
+    contentMixTitle: string;
+    contentMixDesc: string;
+    shortsLabel: string;
+    longFormLabel: string;
+    durationDist: string;
+    videosCountLabel: string;
+    cadenceTitle: string;
+    cadenceDesc: string;
+    firstUpload: string;
+    lastUpload: string;
+    channelAge: string;
+    daysAgo: string;
+    sinceLastUpload: string;
+    avgBetweenUploads: string;
+    uploads30d: string;
+    uploads90d: string;
+    activeMonths: string;
+    silentMonths: string;
+    dayOfWeekTitle: string;
+    dayOfWeekDesc: string;
+    hourOfDayTitle: string;
+    hourOfDayDesc: string;
+    monthlyTitle: string;
+    monthlyDesc: string;
+    themesTitle: string;
+    themesDesc: string;
+    topTags: string;
+    topTitleWords: string;
+    avgTitleLen: string;
+    charsShort: string;
+    noTags: string;
+    transcriptsCoverageTitle: string;
+    transcriptsCoverageDesc: string;
+    coverage: string;
+    avgTranscriptLen: string;
+    languagesLabel: string;
+    growthTitle: string;
+    growthDesc: string;
+    recent5Avg: string;
+    previous5Avg: string;
+    recent10Avg: string;
+    previous10Avg: string;
+    trendUp: string;
+    trendDown: string;
+    trendFlat: string;
+    trendInsufficient: string;
+    daysShort: string;
+  };
+  chat: {
+    title: string;
+    subtitle: string;
+    placeholder: string;
+    send: string;
+    emptyHint: string;
+    missingKey: string;
+    newChat: string;
+    noSessions: string;
+    untitled: string;
+    deleteConfirm: string;
+    tools: string;
+    toolHint: string;
+    noKey: string;
+    attach: string;
+    reconnectedPendingTitle: string;
+    reconnectedPendingHint: string;
+  };
+  attachPicker: {
+    searchPlaceholder: string;
+    empty: string;
+    added: string;
+    done: string;
+    tabVideos: string;
+    tabComments: string;
+    searchCommentsPlaceholder: string;
+    commentsHint: string;
+    commentsEmpty: string;
+    onVideo: string;
+    replyBadge: string;
+  };
+  comments: {
+    topLevelSuffix: string;
+    repliesSuffix: string;
+    lastSynced: string;
+    neverSynced: string;
+    syncFromYouTube: string;
+    syncing: string;
+    searchPlaceholder: string;
+    empty: string;
+    loading: string;
+    loadMore: string;
+    viewReplies: string;
+    hideReplies: string;
+    loadingReplies: string;
+    repliesNotCached: string;
+    fetchAllReplies: string;
+    fetching: string;
+    showMore: string;
+    showLess: string;
+    notSyncedTitle: string;
+    notSyncedDescription: string;
+  };
+  youtube: {
+    bindTitle: string;
+    bindDesc: string;
+    inputLabel: string;
+    sync: string;
+    needKey: string;
+    boundTo: string;
+    subscribers: string;
+    videos: string;
+    done: string;
+  };
+  integrations: {
+    title: string;
+    subtitle: string;
+    save: string;
+    saved: string;
+    showKey: string;
+    hideKey: string;
+    connect: string;
+    comingSoon: string;
+    status: { connected: string; notConnected: string };
+    claude: {
+      name: string;
+      desc: string;
+      placeholder: string;
+      helpTitle: string;
+      helpSteps: string[];
+      helpLink: string;
+      helpLinkLabel: string;
+    };
+    gemini: {
+      name: string;
+      desc: string;
+      placeholder: string;
+      helpTitle: string;
+      helpSteps: string[];
+      helpLink: string;
+      helpLinkLabel: string;
+    };
+    apify: {
+      name: string;
+      desc: string;
+      placeholder: string;
+      helpTitle: string;
+      helpSteps: string[];
+      helpLink: string;
+      helpLinkLabel: string;
+    };
+    exa: {
+      name: string;
+      desc: string;
+      placeholder: string;
+      helpTitle: string;
+      helpSteps: string[];
+      helpLink: string;
+      helpLinkLabel: string;
+    };
+    youtube: {
+      name: string;
+      desc: string;
+      placeholder: string;
+      helpTitle: string;
+      helpSteps: string[];
+      helpLink: string;
+      helpLinkLabel: string;
+    };
+    deepgram: {
+      name: string;
+      desc: string;
+      placeholder: string;
+      helpTitle: string;
+      helpSteps: string[];
+      helpLink: string;
+      helpLinkLabel: string;
+    };
+  };
+  claudeUsage: {
+    title: string;
+    total: string;
+    last24h: string;
+    statTurns: string;
+    statInput: string;
+    statOutput: string;
+    statCacheRead: string;
+    refresh: string;
+    clearHistory: string;
+    confirmClear: string;
+    loading: string;
+    empty: string;
+    emptyMsg: string;
+    advisorUsedTitle: string;
+    rowModel: string;
+    rowIterations: string;
+    rowInputTokens: string;
+    rowOutputTokens: string;
+    rowCacheRead: string;
+    rowCacheWrite: string;
+    rowAdvisor: string;
+    rowAdvisorTokens: string;
+    rowDuration: string;
+    rowActiveTools: string;
+    ledgerSinceHint: string;
+  };
+  deepgram: {
+    // Transcribe-all banner on /videos
+    missingTitle: string;
+    missingHint: string;
+    ctaHint: string;
+    ctaButton: string;
+    runningTitle: string;
+    runningHint: string;
+    spentSoFar: string;
+    doneTitle: string;
+    doneSpent: string;
+    failed: string;
+    notConfiguredHint: string;
+    goToIntegrations: string;
+    // Confirm modal
+    modalTitle: string;
+    modalSubtitle: string;
+    modalRowVideos: string;
+    modalRowDuration: string;
+    modalRowCost: string;
+    modalRowRemaining: string;
+    modalRowAfter: string;
+    overrunWarning: string;
+    firstFew: string;
+    confirm: string;
+    cancel: string;
+    // Usage widget on Integrations page
+    usageTitle: string;
+    transcriptsCount: string;
+    of: string;
+    remainingHint: string;
+    creditLimitLabel: string;
+    recentTitle: string;
+  };
+  import: {
+    title: string;
+    subtitle: string;
+    dropHint: string;
+    button: string;
+    processing: string;
+    success: string;
+    howTitle: string;
+    howDesc: string;
+    importBtn: string;
+    imported: string;
+    skipped: string;
+  };
+  settings: {
+    title: string;
+    subtitle: string;
+    theme: string;
+    themeLight: string;
+    themeDark: string;
+  };
+  googleOAuth: {
+    title: string;
+    subtitle: string;
+    howToTitle: string;
+    howStep1: string;
+    howStep2: string;
+    howStep3: string;
+    howStep4: string;
+    howStep5: string;
+    openConsole: string;
+    clientIdLabel: string;
+    clientSecretLabel: string;
+    currentClientId: string;
+    saveCredsFirst: string;
+    connect: string;
+    reconnect: string;
+    disconnect: string;
+    disconnectConfirm: string;
+    disconnected: string;
+    connectedJustNow: string;
+    errorPrefix: string;
+    activeSession: string;
+    refreshAge: string;
+    reconnectSoon: string;
+    scopesLabel: string;
+    // Extended tips for shared-channel / Brand Account scenarios.
+    tipsTitle: string;
+    tipBrandAccount: string;
+    tipManagerLimitations: string;
+    tipTestUsers: string;
+    tipWhereScopes: string;
+    tipRefreshTokenExpiry: string;
+  };
+};
+
+export const dictionaries: { en: DictionaryShape } = {
+  en: {
+    app: {
+      name: "YT Channel AI",
+      tagline: "AI-powered YouTube channel analytics",
+    },
+    nav: {
+      dashboard: "Dashboard",
+      videos: "Videos",
+      chat: "AI Chat",
+      integrations: "Integrations",
+      import: "Import",
+      logs: "Logs",
+      settings: "Settings",
+    },
+    logs: {
+      title: "Logs",
+      subtitle:
+        "Structured activity log. Every sync, chat turn, and API error lands here — filter by level and source to see what went wrong.",
+      refresh: "Refresh",
+      liveOn: "Live",
+      liveOff: "Live tail",
+      clearAll: "Clear all",
+      confirmClear: "Delete these logs? This cannot be undone.",
+      clickToClear: "Click to clear this level",
+      levelAll: "all levels",
+      sourceAll: "all sources",
+      searchPlaceholder: "Search messages & context…",
+      empty: "No logs match these filters.",
+      loading: "Loading…",
+      kpi: {
+        total: "Total",
+        error: "Errors",
+        warn: "Warnings",
+        info: "Info",
+        debug: "Debug",
+      },
+    },
+    banner: {
+      connectTitle: "Connect your integrations to get started",
+      connectDesc:
+        "Add your API keys for Claude, Apify, Exa, NexLev and YouTube to unlock full analysis.",
+      connectCta: "Go to Integrations",
+    },
+    dashboard: {
+      title: "Dashboard",
+      subtitle: "Overview of your YouTube channel",
+      noData: "No channel data yet. Import a YouTube Studio export or add your API keys first.",
+      emptyTitle: "Nothing to show yet",
+      summaryTitle: "Channel summary",
+      summaryDesc: "Aggregated across all imported videos.",
+      kpi: {
+        subscribers: "Subscribers",
+        views: "Total Views",
+        videos: "Videos",
+        avgViews: "Avg. Views / Video",
+      },
+      channelDetails: "Channel details",
+      topByViews: "Top by views",
+      topByViewsDesc: "Your most-watched videos.",
+      topByEngagement: "Top by engagement",
+      topByEngagementDesc: "Highest (likes + comments) / views ratio.",
+      deeper: "Deeper analysis",
+      deeperDesc: "Outliers, underperformers and monthly output.",
+      bottomByViews: "Bottom by views",
+      bottomByViewsDesc: "Lowest-viewed videos — candidates to retire or relaunch.",
+      outliers: "Outliers",
+      outliersDesc: "Videos that deviated ≥ 2σ from the channel average.",
+      monthly: "Monthly uploads & views",
+      monthlyDesc: "Output cadence and view totals per calendar month.",
+      monthlyCountSuffix: "vids",
+    },
+    videos: {
+      title: "Videos",
+      subtitle: "All videos with transcripts and metadata",
+      empty: "No videos yet. Import your channel data first.",
+      search: "Search videos or transcripts...",
+      sortLabel: "Sort",
+      durationLabel: "Duration",
+      countFound: "{n} videos",
+      sort: {
+        recent: "Newest",
+        oldest: "Oldest",
+        views: "Most views",
+        likes: "Most likes",
+        comments: "Most comments",
+        engagement: "Engagement",
+      },
+      duration: { all: "All", long: "Long-form", short: "Shorts" },
+    },
+    videoDetail: {
+      openOnYouTube: "Open on YouTube",
+      views: "Views",
+      likes: "Likes",
+      comments: "Comments",
+      engagementRate: "Engagement",
+      avgViewsPerDay: "~{n} views / day since publish",
+      askClaudeTitle: "Ask Claude about this video",
+      askClaudeHint:
+        "Attach this video to a new chat — Claude gets the full metadata + transcript as context.",
+      attachToChat: "Attach to chat",
+      tabOverview: "Overview",
+      tabTranscript: "Transcript",
+      tabComments: "Comments",
+      soon: "soon",
+      description: "Description",
+      noDescription: "No description.",
+      noTranscript: "No transcript on file for this video yet.",
+      searchTranscript: "Find in transcript...",
+      copy: "Copy",
+      copied: "Copied",
+      commentsComingSoon: "Comments will appear here once Phase 2 is shipped.",
+      transcribeBtn: "Transcribe with Deepgram",
+      transcribeHint:
+        "Streams audio from YouTube to Deepgram in the cloud — nothing is saved to disk. Takes about 15-40 seconds depending on length.",
+      transcribing: "Transcribing…",
+      reTranscribe: "Re-transcribe",
+      reTranscribeHint:
+        "Replace the existing transcript with a fresh Deepgram run. Useful if the current one is short or wrong.",
+      reTranscribeConfirm:
+        "Replace the current transcript with a fresh Deepgram run? You'll be charged for another transcription on your Deepgram account.",
+      deepgramNotConfigured:
+        "Deepgram isn't configured yet — without it we can't transcribe videos that lack YouTube captions.",
+      openIntegrations: "Open Integrations",
+    },
+    channel: {
+      backToDashboard: "Back to dashboard",
+      emptyTitle: "No channel bound yet",
+      emptyDesc: "Bind your YouTube channel from the Integrations page to populate this view.",
+      unknownTitle: "Unnamed channel",
+      openOnYouTube: "Open on YouTube",
+      aboutTitle: "About",
+      aboutDesc: "Description as it appears on YouTube.",
+      showMore: "Show more",
+      showLess: "Show less",
+      noDescription: "No channel description on file.",
+      metaTitle: "Metadata",
+      channelId: "Channel ID",
+      handleLabel: "Handle",
+      importedAt: "Imported",
+      engagementTitle: "Aggregate engagement",
+      engagementDesc: "Summed across all imported videos.",
+      totalLikes: "Total likes",
+      totalComments: "Total comments",
+      engagementRate: "Engagement rate",
+      importedVideos: "Videos on file",
+      performanceTitle: "Performance distribution",
+      performanceDesc:
+        "How views spread across your videos — is success concentrated in a few hits, or even across the catalog?",
+      perfMin: "Worst",
+      perfP25: "25th %ile",
+      perfMedian: "Median",
+      perfP75: "75th %ile",
+      perfMax: "Best",
+      perfStdev: "Stdev",
+      perfAboveMedian: "Videos above median",
+      perfTopViral: "Best-video reach vs subs",
+      perfTopViralHint:
+        "Your top video's views as % of subscribers. <10% means heavy audience saturation; >100% means you reached well beyond your current base.",
+      contentMixTitle: "Content mix",
+      contentMixDesc: "Shorts vs long-form split and duration breakdown.",
+      shortsLabel: "Shorts (≤60s)",
+      longFormLabel: "Long-form",
+      durationDist: "Duration distribution",
+      videosCountLabel: "videos",
+      cadenceTitle: "Publishing cadence",
+      cadenceDesc: "How often and when you actually ship videos.",
+      firstUpload: "First upload",
+      lastUpload: "Last upload",
+      channelAge: "Channel age",
+      daysAgo: "days ago",
+      sinceLastUpload: "Since last upload",
+      avgBetweenUploads: "Avg days between uploads",
+      uploads30d: "Uploads, last 30d",
+      uploads90d: "Uploads, last 90d",
+      activeMonths: "Active months",
+      silentMonths: "Silent months",
+      dayOfWeekTitle: "By day of week",
+      dayOfWeekDesc: "Which weekdays you publish on and how they perform on average.",
+      hourOfDayTitle: "By hour of day (UTC)",
+      hourOfDayDesc: "UTC hour of publication — shift to your local timezone mentally.",
+      monthlyTitle: "Monthly publishing",
+      monthlyDesc: "Upload count and views per calendar month.",
+      themesTitle: "Content themes",
+      themesDesc: "Recurring tags and title words across your catalog.",
+      topTags: "Top tags",
+      topTitleWords: "Title vocabulary",
+      avgTitleLen: "Avg title length",
+      charsShort: "chars",
+      noTags: "No tags set on any video.",
+      transcriptsCoverageTitle: "Transcript coverage",
+      transcriptsCoverageDesc: "How much of your catalog has a searchable transcript.",
+      coverage: "Coverage",
+      avgTranscriptLen: "Avg transcript length",
+      languagesLabel: "Languages",
+      growthTitle: "Growth trajectory",
+      growthDesc: "Recent uploads performance vs the preceding batch — are views trending up or cooling?",
+      recent5Avg: "Recent 5 avg views",
+      previous5Avg: "Previous 5 avg views",
+      recent10Avg: "Recent 10 avg views",
+      previous10Avg: "Previous 10 avg views",
+      trendUp: "Trending up",
+      trendDown: "Trending down",
+      trendFlat: "Flat",
+      trendInsufficient: "Need at least 10 uploads to judge",
+      daysShort: "d",
+    },
+    chat: {
+      title: "AI Chat",
+      subtitle: "Ask Claude anything about your channel",
+      placeholder: "Ask about your channel, competitors, content ideas...",
+      send: "Send",
+      emptyHint:
+        "Try: \"What are my top performing videos?\" or \"Suggest 5 new video ideas based on my niche\"",
+      missingKey: "Add your Claude API key in Integrations to start chatting.",
+      newChat: "New chat",
+      noSessions: "No chats yet",
+      untitled: "Untitled chat",
+      deleteConfirm: "Delete this chat permanently?",
+      tools: "Tools for this conversation",
+      toolHint: "Enable tools to let Claude fetch live data (YouTube, web, scrapers).",
+      noKey: "no key",
+      attach: "Attach video or comment",
+      reconnectedPendingTitle: "Claude is still generating a response…",
+      reconnectedPendingHint:
+        "The turn is running on the server. You can keep browsing — the answer will appear here when it's ready.",
+    },
+    attachPicker: {
+      searchPlaceholder: "Search videos by title...",
+      empty: "No videos match that search.",
+      added: "Added",
+      done: "Done",
+      tabVideos: "Videos",
+      tabComments: "Comments",
+      searchCommentsPlaceholder: "Search comments by text or author...",
+      commentsHint: "Type to search your cached comments. Sync a video's comments first from its page.",
+      commentsEmpty: "No comments match that search.",
+      onVideo: "on",
+      replyBadge: "reply",
+    },
+    comments: {
+      topLevelSuffix: "top-level",
+      repliesSuffix: "replies",
+      lastSynced: "Last synced",
+      neverSynced: "never",
+      syncFromYouTube: "Sync from YouTube",
+      syncing: "Syncing…",
+      searchPlaceholder: "Filter comments…",
+      empty: "No comments synced yet. Hit \"Sync from YouTube\" to pull them.",
+      loading: "Loading…",
+      loadMore: "Load more",
+      viewReplies: "View {n} replies",
+      hideReplies: "Hide replies",
+      loadingReplies: "Loading replies…",
+      repliesNotCached: "No replies cached for this thread yet.",
+      fetchAllReplies: "Fetch {n} more replies from YouTube",
+      fetching: "Fetching…",
+      showMore: "Show more",
+      showLess: "Show less",
+      notSyncedTitle: "Comments not synced yet",
+      notSyncedDescription:
+        "AI can't analyze comments for this video until you sync them. One click → all comments and replies are pulled into the local DB so chat tools can read them.",
+    },
+    integrations: {
+      title: "Integrations",
+      subtitle: "Connect external services to enable AI analysis",
+      save: "Save",
+      saved: "Saved",
+      showKey: "Show",
+      hideKey: "Hide",
+      connect: "Connect",
+      comingSoon: "Coming soon",
+      status: {
+        connected: "Connected",
+        notConnected: "Not connected",
+      },
+      claude: {
+        name: "Claude (Anthropic)",
+        desc: "Required. Powers every AI analysis and chat turn. Without this key the app is a read-only dashboard.",
+        placeholder: "sk-ant-...",
+        helpTitle: "How to get a Claude API key",
+        helpSteps: [
+          "Go to console.anthropic.com and sign in (or create an account — personal email works).",
+          "Open the left sidebar → API Keys → Create Key. Give it any name (e.g. \"yt-channel-ai\").",
+          "Copy the key (starts with sk-ant-…). You'll see it only once — save it now or regenerate later.",
+          "Paste it into the field below and hit Save.",
+          "Cost note: you pay per-token. A typical chat turn with 2+ tools + Opus advisor costs $0.05–$0.30. Budget a few dollars per audit session.",
+        ],
+        helpLink: "https://console.anthropic.com/settings/keys",
+        helpLinkLabel: "Open Anthropic Console",
+      },
+      gemini: {
+        name: "Google Gemini",
+        desc: "Optional second AI brain. Pick Gemini in the chat header for tasks where Google's larger YouTube knowledge graph helps; keep Claude for sharper reasoning on the data you've imported.",
+        placeholder: "AIzaSy...",
+        helpTitle: "How to get a Gemini API key",
+        helpSteps: [
+          "Go to aistudio.google.com and sign in with the Google account you want billed.",
+          "Click \"Get API key\" (top-right or sidebar). Create one — give it any name.",
+          "Copy the key (starts with AIza…). Paste it below and Save.",
+          "Pricing on Gemini 2.5 Flash: $0.30 / $2.50 per million tokens (input/output) — roughly half the cost of Claude Sonnet for typical chat turns. Pro is ~4× more expensive but better at long-context analysis.",
+          "The chat lets you switch between Flash, Pro, and Claude per session — start with Flash and bump to Pro only when you need it.",
+        ],
+        helpLink: "https://aistudio.google.com/apikey",
+        helpLinkLabel: "Open Google AI Studio",
+      },
+      apify: {
+        name: "Apify (transcripts + scrapers)",
+        desc: "Powers YouTube video transcript fetching when YouTube's free [CC] feed doesn't work — Apify's residential proxies bypass the datacenter block we hit on Railway. Also drives competitor channel scraping and comment fetching. Free plan ships $5 / month of credit ≈ 250 transcripts. NOT free after that — every transcript ≈ $0.02, competitor scrapes ≈ $0.05–$0.10.",
+        placeholder: "apify_api_...",
+        helpTitle: "How to get an Apify API token",
+        helpSteps: [
+          "Sign up at apify.com — the Free plan includes $5 of usage credit every month, no credit card needed up front.",
+          "In the console, click your profile avatar → Settings → Integrations (or open the Integrations tab directly).",
+          "Copy your Personal API token (it starts with apify_api_).",
+          "Paste it below and Save. The progress bar that appears after will show how much of the $5 monthly credit is left.",
+          "Cost guide: YouTube transcript ≈ $0.02 / video (so ~250 transcripts on the free $5). Competitor channel scrape ≈ $0.05 / channel. Run out before month end? Just top up the account at console.apify.com/billing.",
+        ],
+        helpLink: "https://console.apify.com/account/integrations",
+        helpLinkLabel: "Open Apify Console",
+      },
+      exa: {
+        name: "Exa",
+        desc: "Semantic web search — Claude uses this to find articles, competitors, industry context outside YouTube.",
+        placeholder: "Your Exa API key",
+        helpTitle: "How to get an Exa API key",
+        helpSteps: [
+          "Sign up at exa.ai. New accounts get 1,000 free searches.",
+          "In the dashboard, find API Keys (top-right or sidebar). Create one.",
+          "Copy and paste below. Pricing after free tier: $5 per 1k neural searches — cheap for normal use.",
+          "When to enable: whenever the user asks about competitors by name, niche trends, or anything that requires live web context.",
+        ],
+        helpLink: "https://dashboard.exa.ai/api-keys",
+        helpLinkLabel: "Open Exa Dashboard",
+      },
+      youtube: {
+        name: "YouTube Data API v3",
+        desc: "Public YouTube data — videos, statistics, captions, search, comments. Required for syncing a channel.",
+        placeholder: "YouTube API key",
+        helpTitle: "How to get a YouTube API key",
+        helpSteps: [
+          "Open Google Cloud Console → APIs & Services → Library. Create a project (or reuse one).",
+          "Search for \"YouTube Data API v3\" and click Enable.",
+          "Go to APIs & Services → Credentials → Create credentials → API key. No OAuth needed for this key.",
+          "Copy and paste below. Default quota is 10,000 units/day — a full channel sync uses ~50–200 units, plenty.",
+          "Security tip: click \"Restrict key\" after creating and limit it to \"YouTube Data API v3\" only.",
+        ],
+        helpLink: "https://console.cloud.google.com/apis/credentials",
+        helpLinkLabel: "Open Google Cloud Console",
+      },
+      deepgram: {
+        name: "Deepgram (speech-to-text)",
+        desc: "Generates transcripts for videos without YouTube captions. Cloud-only — audio never touches your disk, only transits RAM for a few seconds per video.",
+        placeholder: "Deepgram API key",
+        helpTitle: "How to get a Deepgram API key",
+        helpSteps: [
+          "Sign up at deepgram.com. New accounts get $200 of free credit — enough for ~770 hours of audio (Nova-3 model).",
+          "In the console, go to API Keys → Create a new key. Scope: \"Member\" is enough.",
+          "Copy and paste below. Pricing after free credit: $0.0043/min = $0.26/hour of audio.",
+          "How it works here: click \"Transcribe all\" on the Videos page — yt-dlp pulls audio, streams it through RAM to Deepgram, saves only the text. Zero disk I/O, zero accumulation.",
+          "The credit bar below tracks spending. When you switch channels, transcripts auto-delete with the old videos, but your $ balance stays.",
+        ],
+        helpLink: "https://console.deepgram.com/",
+        helpLinkLabel: "Open Deepgram Console",
+      },
+    },
+    claudeUsage: {
+      title: "Spend history",
+      total: "Total",
+      last24h: "Last 24h",
+      statTurns: "Chat turns",
+      statInput: "Input tokens",
+      statOutput: "Output tokens",
+      statCacheRead: "Cache reads",
+      refresh: "Refresh",
+      clearHistory: "Clear history",
+      confirmClear:
+        "Clear the spend ledger? This only resets what's shown here — it doesn't refund anything on your Anthropic bill.",
+      loading: "Loading…",
+      empty: "No chat turns yet — the ledger fills up as you talk with Claude.",
+      emptyMsg: "(attachments only)",
+      advisorUsedTitle: "Opus advisor was consulted this turn",
+      rowModel: "Executor model",
+      rowIterations: "Tool iterations",
+      rowInputTokens: "Input tokens",
+      rowOutputTokens: "Output tokens",
+      rowCacheRead: "Cache read (90% off)",
+      rowCacheWrite: "Cache write",
+      rowAdvisor: "Advisor",
+      rowAdvisorTokens: "Advisor tokens (in/out)",
+      rowDuration: "Duration",
+      rowActiveTools: "Active tools",
+      ledgerSinceHint:
+        "Ledger tracks turns since {date}. Older chats (before tracking was added, or on error paths before a recent fix) won't appear here but still show on your Anthropic console.",
+    },
+    deepgram: {
+      missingTitle: "{n} videos have no transcript",
+      missingHint: "{n} videos have no transcript",
+      ctaHint: "Total audio: {duration} · Estimated cost: {amount}",
+      ctaButton: "Transcribe all",
+      runningTitle: "Transcribing",
+      runningHint:
+        "Running on the server — safe to close this tab. Come back anytime to check progress.",
+      spentSoFar: "Spent: {amount}",
+      doneTitle: "Transcription complete",
+      doneSpent: "Spent: {amount}",
+      failed: "failed",
+      notConfiguredHint:
+        "Add your Deepgram API key in Integrations to transcribe videos without YouTube captions.",
+      goToIntegrations: "Open Integrations",
+      modalTitle: "Transcribe missing videos",
+      modalSubtitle: "Audio is streamed directly from YouTube to Deepgram — nothing is saved to your computer.",
+      modalRowVideos: "Videos",
+      modalRowDuration: "Total duration",
+      modalRowCost: "Estimated cost",
+      modalRowRemaining: "Credit remaining",
+      modalRowAfter: "After this batch",
+      overrunWarning:
+        "This batch would exceed your remaining credit. Deepgram may reject jobs partway through.",
+      firstFew: "First few videos in queue",
+      confirm: "Start transcribing",
+      cancel: "Cancel",
+      usageTitle: "Usage",
+      transcriptsCount: "{n} transcripts",
+      of: "of",
+      remainingHint: "Remaining: {amount} (~{hours}h of audio)",
+      creditLimitLabel: "Credit limit",
+      recentTitle: "Recent transcriptions",
+    },
+    import: {
+      title: "Import",
+      subtitle: "Import your YouTube Studio CSV export",
+      dropHint: "Drop your YT Studio CSV here or click to browse",
+      button: "Select file",
+      processing: "Processing...",
+      success: "Imported successfully",
+      howTitle: "Import from YouTube Studio",
+      howDesc:
+        "1. Open YouTube Studio → Content.\n2. Click the 'Export' button (top right) and choose 'Google Sheets' or 'Comma-separated values'.\n3. Upload the downloaded CSV file below.",
+      importBtn: "Import",
+      imported: "{n} videos imported",
+      skipped: "{n} skipped",
+    },
+    youtube: {
+      bindTitle: "Bind your channel",
+      bindDesc:
+        "Paste a @handle, channel URL, or channel ID. We'll pull channel stats, videos, views/likes/comments via the YouTube Data API.",
+      inputLabel: "Channel",
+      sync: "Sync",
+      needKey: "Set a YouTube API key above to enable binding.",
+      boundTo: "Bound",
+      subscribers: "subs",
+      videos: "videos",
+      done: "Synced {n} videos.",
+    },
+    settings: {
+      title: "Settings",
+      subtitle: "App preferences",
+      theme: "Theme",
+      themeLight: "Light",
+      themeDark: "Dark",
+    },
+    googleOAuth: {
+      title: "YouTube Analytics (Google OAuth)",
+      subtitle:
+        "Connect your Google account to pull private analytics (retention, traffic sources, revenue, demographics). Different from the YouTube Data API key above — that one fetches public data, this one unlocks your private Studio data.",
+      howToTitle: "How to set up your own OAuth client",
+      howStep1: "Google Cloud Console → Credentials. Create a project (or reuse the one you made for the YouTube Data API key).",
+      howStep2:
+        "APIs & Services → Library. Enable both \"YouTube Analytics API\" and \"YouTube Data API v3\" — they are separate APIs and both must be enabled.",
+      howStep3:
+        "Credentials → Create credentials → OAuth 2.0 Client ID → \"Web application\". Under \"Authorised redirect URIs\" add:",
+      howStep4:
+        "Google Auth Platform → Audience → Test users → add the Google email you'll log in with (yours, or your boss's if that's whose channel you're analysing). Publishing status stays \"Testing\".",
+      howStep5:
+        "Google Auth Platform → Data Access → Add scopes. Paste: youtube.readonly, yt-analytics.readonly, yt-analytics-monetary.readonly. Save.",
+      openConsole: "Open Google Cloud Console",
+      clientIdLabel: "OAuth Client ID",
+      clientSecretLabel: "OAuth Client secret",
+      currentClientId: "Saved",
+      saveCredsFirst: "Save your client ID and secret first",
+      connect: "Connect with Google",
+      reconnect: "Reconnect",
+      disconnect: "Disconnect",
+      disconnectConfirm: "Disconnect and remove saved Google tokens?",
+      disconnected: "Disconnected from Google.",
+      connectedJustNow: "Connected to Google successfully.",
+      errorPrefix: "OAuth error",
+      activeSession: "Active Google session",
+      refreshAge:
+        "Refresh token is {n} days old (Google test mode expires tokens after 7 days).",
+      reconnectSoon: "reconnect soon",
+      scopesLabel: "Scopes",
+      tipsTitle: "Important tips (real-world scenarios)",
+      tipBrandAccount:
+        "If you are analysing someone else's channel (e.g. your boss's), they need to add your email as a Manager under YouTube Studio → Settings → Permissions. This only works for Brand Accounts — personal channels must either be converted to Brand, or the owner logs in once on your machine.",
+      tipManagerLimitations:
+        "Manager-level access gives you views, watch time, demographics, traffic sources, retention. It does NOT give revenue/RPM/earnings — those require Owner. If you need revenue data, the owner must either make you an Owner or log in themselves.",
+      tipTestUsers:
+        "The account you click \"Connect\" with must be in the Test users list (see step 4). If you sign in with a different account you'll get \"Access blocked: app has not completed verification\".",
+      tipWhereScopes:
+        "In Google's new Cloud Console UI, scopes are under \"Data Access\" (not \"OAuth consent screen → Scopes\" like the old docs say). Test users moved to \"Audience\".",
+      tipRefreshTokenExpiry:
+        "In Testing mode, Google expires refresh tokens after 7 days. When you see the amber \"reconnect soon\" hint below, just click Reconnect — your saved scopes stay, only the tokens refresh.",
+    },
+  },
+};
+
+export type Locale = keyof typeof dictionaries;
+export type Dictionary = DictionaryShape;
