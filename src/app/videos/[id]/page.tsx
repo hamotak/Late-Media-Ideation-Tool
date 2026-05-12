@@ -21,7 +21,6 @@ import {
   RotateCw,
   BarChart3,
   Upload,
-  Zap,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -175,43 +174,7 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
   const [transcribingUrl, setTranscribingUrl] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
-  const [transcribingApify, setTranscribingApify] = useState(false);
-  const [apifyReady, setApifyReady] = useState<boolean | null>(null);
 
-  useEffect(() => {
-    fetch("/api/integrations")
-      .then((r) => r.json())
-      .then((d) => setApifyReady(!!d?.integrations?.apify?.hasKey))
-      .catch(() => setApifyReady(false));
-  }, []);
-
-  /**
-   * Auto-magic path: Apify YouTube Transcript actor. Uses residential
-   * proxies on Apify's end, so it survives Railway's datacenter IP
-   * block. Costs ~$0.02 per video against the user's Apify credit
-   * (Free plan ships $5/mo = ~250 transcripts).
-   */
-  const transcribeViaApify = useCallback(async () => {
-    setTranscribingApify(true);
-    setTcError(null);
-    setTcDebug(null);
-    try {
-      const r = await fetch(`/api/videos/${id}/transcribe-apify`, {
-        method: "POST",
-      });
-      const d = (await r.json().catch(() => ({}))) as {
-        ok?: boolean;
-        error?: string;
-        unavailable?: boolean;
-      };
-      if (!r.ok) throw new Error(d.error ?? `HTTP ${r.status}`);
-      await loadDetail();
-    } catch (e) {
-      setTcError(e instanceof Error ? e.message : "Apify transcription failed");
-    } finally {
-      setTranscribingApify(false);
-    }
-  }, [id, loadDetail]);
   // Upload a local audio/video file. Browser POSTs multipart, server
   // buffers it in RAM, streams to Deepgram, persists the text. Nothing
   // touches disk on the server.
@@ -550,9 +513,6 @@ export default function VideoDetailPage({ params }: { params: Promise<{ id: stri
           setUrlInput={setUrlInput}
           transcribingUrl={transcribingUrl}
           onTranscribeUrl={transcribeViaUrl}
-          apifyReady={apifyReady}
-          transcribingApify={transcribingApify}
-          onTranscribeApify={transcribeViaApify}
         />
       )}
 
@@ -644,9 +604,6 @@ function TranscriptPanel({
   setUrlInput,
   transcribingUrl,
   onTranscribeUrl,
-  apifyReady,
-  transcribingApify,
-  onTranscribeApify,
 }: {
   durationSeconds: number | null;
   transcript: { text: string; language: string | null } | null;
@@ -673,9 +630,6 @@ function TranscriptPanel({
   setUrlInput: (s: string) => void;
   transcribingUrl: boolean;
   onTranscribeUrl: () => void;
-  apifyReady: boolean | null;
-  transcribingApify: boolean;
-  onTranscribeApify: () => void;
 }) {
   const { t } = useI18n();
   const highlighted = useHighlightedText(transcript?.text ?? "", query);
@@ -756,55 +710,19 @@ function TranscriptPanel({
                 )}
               </Button>
             )}
-            {apifyReady && (
-              <Button
-                onClick={onTranscribeApify}
-                disabled={transcribingApify}
-                size="sm"
-                variant="outline"
-                className="gap-2"
-              >
-                {transcribingApify ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Transcribing via Apify…
-                  </>
-                ) : (
-                  <>
-                    <Zap className="h-4 w-4" />
-                    Apify (fallback)
-                    <span className="ml-1 rounded bg-primary-foreground/15 px-1.5 py-0.5 text-[10px] font-mono">
-                      ~$0.02
-                    </span>
-                  </>
-                )}
-              </Button>
-            )}
           </div>
 
           <p className="text-[11px] text-muted-foreground">
             Free path tries YouTube&apos;s [CC] feed (~80% of videos work).
             Deepgram path runs locally — yt-dlp grabs the audio, streams it
             to Deepgram (≈$0.0043 / min), transcript lands in your local DB.
-            Apify is the optional fallback (residential proxies, ≈$0.02 /
-            video) if yt-dlp is blocked on your network.
             {deepgramReady === false && (
               <>
                 {" "}
                 <Link href="/integrations" className="text-primary hover:underline">
                   Add Deepgram key
                 </Link>{" "}
-                to enable the recommended local path.
-              </>
-            )}
-            {apifyReady === false && deepgramReady && (
-              <>
-                {" "}
-                Apify disabled —{" "}
-                <Link href="/integrations" className="text-primary hover:underline">
-                  add API token
-                </Link>
-                .
+                to enable transcription.
               </>
             )}
           </p>
@@ -885,26 +803,6 @@ function TranscriptPanel({
                 <Sparkles className="h-3.5 w-3.5" />
               )}
               {transcribing ? "Deepgram…" : "Deepgram"}
-            </Button>
-          )}
-          {apifyReady && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                if (!confirm("Re-transcribe via Apify (~$0.02)?")) return;
-                onTranscribeApify();
-              }}
-              disabled={transcribingApify}
-              className="gap-1.5"
-              title="Re-transcribe via Apify YouTube transcript actor (~$0.02 per video)"
-            >
-              {transcribingApify ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Zap className="h-3.5 w-3.5" />
-              )}
-              {transcribingApify ? "Apify…" : "Apify"}
             </Button>
           )}
         </div>

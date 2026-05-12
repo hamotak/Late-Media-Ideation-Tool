@@ -736,8 +736,8 @@ export const dictionaries: { en: DictionaryShape } = {
         helpLinkLabel: "Open Google AI Studio",
       },
       apify: {
-        name: "Apify (transcripts + scrapers)",
-        desc: "Powers YouTube video transcript fetching when YouTube's free [CC] feed doesn't work — Apify's residential proxies bypass the datacenter block we hit on Railway. Also drives competitor channel scraping and comment fetching. Free plan ships $5 / month of credit ≈ 250 transcripts. NOT free after that — every transcript ≈ $0.02, competitor scrapes ≈ $0.05–$0.10.",
+        name: "Apify (competitor scrapers)",
+        desc: "Optional. Powers competitor channel scraping and bulk comment fetching when you analyse other people's channels. Transcription itself runs on Deepgram in this build — Apify is only here for the scraper actors. Free plan ships $5 / month of credit ≈ 100 competitor channel syncs (~$0.05 each).",
         placeholder: "apify_api_...",
         helpTitle: "How to get an Apify API token",
         helpSteps: [
@@ -745,7 +745,7 @@ export const dictionaries: { en: DictionaryShape } = {
           "In the console, click your profile avatar → Settings → Integrations (or open the Integrations tab directly).",
           "Copy your Personal API token (it starts with apify_api_).",
           "Paste it below and Save. The progress bar that appears after will show how much of the $5 monthly credit is left.",
-          "Cost guide: YouTube transcript ≈ $0.02 / video (so ~250 transcripts on the free $5). Competitor channel scrape ≈ $0.05 / channel. Run out before month end? Just top up the account at console.apify.com/billing.",
+          "Cost guide: competitor channel scrape ≈ $0.05 / channel (so ~100 channels on the free $5). Run out before month end? Just top up the account at console.apify.com/billing.",
         ],
         helpLink: "https://console.apify.com/account/integrations",
         helpLinkLabel: "Open Apify Console",

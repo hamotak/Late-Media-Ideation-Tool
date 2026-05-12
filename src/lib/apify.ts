@@ -71,66 +71,8 @@ export async function apifyYouTubeScrape(
   );
 }
 
-/**
- * Apify YouTube transcript extractor.
- *
- * The pintostudio actor takes ONE URL per run (field name is
- * `videoUrl`, singular). We call it sequentially per video so the
- * caller can pass an array as a convenience — Apify-side latency
- * still wins over yt-dlp on a datacenter IP because each call goes
- * through a residential pool.
- */
-export async function apifyYouTubeTranscript(
-  videoUrls: string[],
-  apiKey: string
-): Promise<{ url: string; transcript: string; language?: string }[]> {
-  const out: { url: string; transcript: string; language?: string }[] = [];
-  for (const url of videoUrls) {
-    try {
-      const items = await runActorSync<{
-        url?: string;
-        videoUrl?: string;
-        transcript?: string;
-        subtitles?: string;
-        // The transcript scraper actually returns `data: [{text, dur, start}, ...]`
-        // — the older `transcript` string field is gone in current versions.
-        data?: Array<{ text?: string; start?: string; dur?: string }>;
-        language?: string;
-      }>(
-        "pintostudio~youtube-transcript-scraper",
-        { videoUrl: url },
-        apiKey,
-        { timeoutSecs: 180 }
-      );
-      const first = items[0];
-      // Reassemble from the `data` array when present (current format),
-      // fall back to legacy `transcript`/`subtitles` strings otherwise.
-      const text =
-        first?.transcript ??
-        first?.subtitles ??
-        (Array.isArray(first?.data)
-          ? first.data
-              .map((d) => d.text ?? "")
-              .filter(Boolean)
-              .join(" ")
-              .replace(/\s+/g, " ")
-              .trim()
-          : "");
-      out.push({
-        url: first?.url ?? first?.videoUrl ?? url,
-        transcript: text,
-        language: first?.language,
-      });
-    } catch (err) {
-      // Surface per-video errors but keep going for the rest of the
-      // batch — one busted video shouldn't void a 50-video sync.
-      out.push({
-        url,
-        transcript: "",
-        language: undefined,
-      });
-      void err;
-    }
-  }
-  return out;
-}
+// `apifyYouTubeTranscript` was removed in this fork — transcription
+// runs exclusively through Deepgram (yt-dlp pulls audio locally, streams
+// to Deepgram, transcript lands in SQLite). The Apify integration is
+// kept around solely for competitor channel scraping via
+// `apifyYouTubeScrape` above.

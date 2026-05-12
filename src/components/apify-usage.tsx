@@ -11,7 +11,7 @@ type Snapshot = {
   monthlyUsedUsd: number | null;
   remainingUsd: number | null;
   percentageUsed: number | null;
-  estimatedTranscriptsRemaining: number | null;
+  estimatedScrapesRemaining: number | null;
   cycleEndAt: string | null;
 };
 
@@ -146,12 +146,12 @@ export function ApifyUsage({ enabled }: { enabled: boolean }) {
               )}
             </span>
             <span>
-              {snap.estimatedTranscriptsRemaining !== null && (
+              {snap.estimatedScrapesRemaining !== null && (
                 <>
                   <strong className="text-foreground">
-                    ~{snap.estimatedTranscriptsRemaining}
+                    ~{snap.estimatedScrapesRemaining}
                   </strong>{" "}
-                  transcripts left
+                  competitor scrapes left
                 </>
               )}
             </span>
@@ -159,8 +159,8 @@ export function ApifyUsage({ enabled }: { enabled: boolean }) {
         </div>
 
         <div className="border-t border-border pt-2 text-[10px] text-muted-foreground">
-          Used for YouTube transcript fetching when the free path
-          (timedtext / Innertube) fails — ~$0.02 per video on average.
+          Used for competitor channel scraping (≈$0.05 per channel-sync).
+          Transcription itself runs through Deepgram, not Apify.
           {snap.cycleEndAt && (
             <>
               {" "}Resets{" "}

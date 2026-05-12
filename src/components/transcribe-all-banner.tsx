@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { FileText, Loader2, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
 type Preview = {
@@ -26,56 +27,41 @@ type TranscriptionJob = {
   last_error: string | null;
 };
 
-type ApifyUsageLite = {
-  configured: boolean;
-  usage: {
-    remainingUsd: number | null;
-    estimatedTranscriptsRemaining: number | null;
-  } | null;
+type UsageLite = {
+  limitCents: number;
+  totalCostCents: number;
+  remainingCents: number;
 };
 
 /**
- * "Transcribe all missing" entrypoint on /videos.
- *
- * Switched in May 2026 from Deepgram (which couldn't reach YouTube
- * audio from datacenter IPs) to Apify's residential-proxy actor.
- * Same UX, different backend: button → confirm modal showing cost
- * estimate → background job → live progress bar → result summary.
- *
- * Videos without usable captions (no voice, region-locked, captions
- * disabled) are reported by Apify as empty transcripts and the batch
- * SKIPS them — they count as `done` so progress moves forward, but a
- * note like "12 videos had no captions" appears in the final summary
- * so the user knows the queue didn't silently fail.
- *
- * Four UI states:
- *   1. Active batch job → progress bar, poll every 2s.
- *   2. Job just finished → result summary until user dismisses it.
- *   3. There are videos without transcripts and Apify is configured
- *      → show CTA + cost preview.
- *   4. Apify not configured (yet have missing videos) → soft hint
- *      pointing at /integrations.
- *   5. Nothing to do → render nothing (banner stays invisible).
+ * The "Transcribe all missing" entrypoint on /videos. Three states:
+ *   1. There's an active batch job running → show progress bar, poll.
+ *   2. Batch just finished (completed/failed) → show brief result summary
+ *      until the user dismisses it.
+ *   3. There are videos without transcripts → show the call-to-action.
+ *   4. No missing videos + no recent job → render nothing (banner is
+ *      invisible when there's no work to do).
  */
 export function TranscribeAllBanner() {
+  const { t } = useI18n();
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [usage, setUsage] = useState<ApifyUsageLite | null>(null);
+  const [usage, setUsage] = useState<UsageLite | null>(null);
   const [job, setJob] = useState<TranscriptionJob | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [apifyReady, setApifyReady] = useState<boolean | null>(null);
+  const [deepgramReady, setDeepgramReady] = useState<boolean | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
   const loadPreview = useCallback(async () => {
     try {
       const [p, u, i] = await Promise.all([
-        fetch("/api/apify/transcribe-batch").then((r) => r.json()),
-        fetch("/api/integrations/apify/usage").then((r) => r.json()).catch(() => null),
+        fetch("/api/deepgram/transcribe-batch").then((r) => r.json()),
+        fetch("/api/deepgram/usage").then((r) => r.json()).catch(() => null),
         fetch("/api/integrations").then((r) => r.json()),
       ]);
       setPreview(p);
       setUsage(u);
-      setApifyReady(!!i?.integrations?.apify?.hasKey);
+      setDeepgramReady(!!i?.integrations?.deepgram?.hasKey);
       if (p.activeJob) setJob(p.activeJob);
     } catch {
       /* ignore */
@@ -86,20 +72,21 @@ export function TranscribeAllBanner() {
     loadPreview();
   }, [loadPreview]);
 
-  // Poll the latest transcription job while one is running. Server
-  // shares the transcription_jobs table between Apify and Deepgram
-  // batches, so the same endpoint surfaces whichever is active.
+  // Poll for job progress while one is running. We fetch the latest job,
+  // not a specific id — a new job replaces the current view automatically.
   useEffect(() => {
     if (!job || job.status !== "running") return;
     let cancelled = false;
     const tick = async () => {
       try {
-        const res = await fetch("/api/apify/jobs/latest");
+        const res = await fetch("/api/deepgram/jobs/latest");
         if (!res.ok) return;
         const data = (await res.json()) as { job: TranscriptionJob | null };
         if (cancelled) return;
         if (data.job) {
           setJob(data.job);
+          // When the job transitions from running → completed/failed, also
+          // refresh the preview so "missing videos" count drops to 0.
           if (data.job.status !== "running") {
             loadPreview();
           }
@@ -119,9 +106,10 @@ export function TranscribeAllBanner() {
   const startBatch = async () => {
     setStarting(true);
     try {
-      const res = await fetch("/api/apify/transcribe-batch", { method: "POST" });
+      const res = await fetch("/api/deepgram/transcribe-batch", { method: "POST" });
       const data = await res.json();
       if (data.jobId) {
+        // Bootstrap a minimal job record so polling picks up.
         setJob({
           id: data.jobId,
           started_at: Math.floor(Date.now() / 1000),
@@ -143,31 +131,23 @@ export function TranscribeAllBanner() {
     }
   };
 
+  // A finished job lingers as a result summary until dismissed OR until
+  // a new one starts. Hide it automatically once the user acknowledges.
   const finishedJob = job && job.status !== "running" && !dismissed ? job : null;
 
-  // Apify not configured but there ARE missing videos → soft hint.
-  // Different copy from the old Deepgram banner because we point to
-  // the Apify card with the credit progress bar, not Deepgram.
-  if (apifyReady === false) {
+  // Deepgram not configured — don't show CTA, but show a soft hint if there
+  // ARE missing transcripts (so user knows the feature exists).
+  if (!deepgramReady) {
     if (!preview || preview.missing === 0) return null;
     return (
       <div className="mb-4 flex items-start gap-3 rounded-lg border border-dashed border-border bg-muted/30 p-3 text-sm">
         <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <div className="flex-1">
-          <div className="font-medium">
-            {preview.missing} video{preview.missing === 1 ? "" : "s"} have no
-            transcript
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            Add an Apify API key in Integrations to batch-transcribe everything
-            (~$0.02 / video; Apify Free plan includes $5 / month credit).
-          </div>
+          <div className="font-medium">{t.deepgram.missingHint.replace("{n}", String(preview.missing))}</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">{t.deepgram.notConfiguredHint}</div>
         </div>
-        <a
-          href="/integrations"
-          className="shrink-0 text-xs font-medium text-primary hover:underline"
-        >
-          Open Integrations →
+        <a href="/integrations" className="shrink-0 text-xs font-medium text-primary hover:underline">
+          {t.deepgram.goToIntegrations} →
         </a>
       </div>
     );
@@ -178,26 +158,20 @@ export function TranscribeAllBanner() {
     const ok = finishedJob.done;
     const bad = finishedJob.failed;
     const spent = (finishedJob.cost_cents / 100).toFixed(2);
-    // last_error doubles as a "soft note" channel: skipped-no-captions
-    // messages flow through it. We surface them at the end so the user
-    // sees "12 had no captions" instead of being confused why some
-    // videos still show "missing" in the list below.
-    const note = finishedJob.last_error;
     return (
       <div className="mb-4 flex items-start gap-3 rounded-lg border border-border bg-green-500/5 p-3 text-sm">
         <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-green-600 dark:text-green-400" />
         <div className="flex-1">
           <div className="font-medium">
-            Batch finished: {ok} / {finishedJob.total}
+            {t.deepgram.doneTitle}: {ok} / {finishedJob.total}
             {bad > 0 && (
-              <span className="ml-2 text-destructive">({bad} failed)</span>
+              <span className="ml-2 text-destructive">
+                ({bad} {t.deepgram.failed})
+              </span>
             )}
           </div>
           <div className="mt-0.5 text-xs text-muted-foreground">
-            ~${spent} of Apify credit used
-            {note && note.includes("no captions") && (
-              <> · {note}</>
-            )}
+            {t.deepgram.doneSpent.replace("{amount}", `$${spent}`)}
           </div>
         </div>
         <button
@@ -220,13 +194,13 @@ export function TranscribeAllBanner() {
         <div className="flex items-center justify-between text-sm">
           <span className="inline-flex items-center gap-2 font-medium">
             <Loader2 className="h-4 w-4 animate-spin text-primary" />
-            Transcribing: {job.done} / {job.total}
+            {t.deepgram.runningTitle}: {job.done} / {job.total}
             {job.failed > 0 && (
-              <span className="text-destructive">({job.failed} failed)</span>
+              <span className="text-destructive">({job.failed} {t.deepgram.failed})</span>
             )}
           </span>
           <span className="text-xs text-muted-foreground">
-            ~${spent} of Apify credit so far
+            {t.deepgram.spentSoFar.replace("{amount}", `$${spent}`)}
           </span>
         </div>
         <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -236,8 +210,7 @@ export function TranscribeAllBanner() {
           />
         </div>
         <p className="text-xs text-muted-foreground">
-          You can leave this page — the batch runs in the background. Videos
-          with no captions or no voice will be skipped automatically.
+          {t.deepgram.runningHint}
         </p>
       </div>
     );
@@ -258,17 +231,17 @@ export function TranscribeAllBanner() {
         <FileText className="h-5 w-5 shrink-0 text-primary" />
         <div className="flex-1 text-sm">
           <div className="font-medium">
-            {preview.missing} video{preview.missing === 1 ? "" : "s"} have no
-            transcript
+            {t.deepgram.missingTitle.replace("{n}", String(preview.missing))}
           </div>
           <div className="text-xs text-muted-foreground">
-            ~{durationLabel} of audio · estimated ~${costUsd} of Apify credit
-            (videos without captions or voice get skipped automatically).
+            {t.deepgram.ctaHint
+              .replace("{duration}", durationLabel)
+              .replace("{amount}", `$${costUsd}`)}
           </div>
         </div>
         <Button size="sm" onClick={() => setModalOpen(true)} className="shrink-0 gap-2">
           <Sparkles className="h-4 w-4" />
-          Transcribe all via Apify
+          {t.deepgram.ctaButton}
         </Button>
       </div>
 
@@ -296,23 +269,22 @@ function ConfirmModal({
   onConfirm: () => void;
   starting: boolean;
   preview: Preview;
-  usage: ApifyUsageLite | null;
+  usage: UsageLite | null;
 }) {
+  const { t } = useI18n();
   const costUsd = (preview.estimatedCostCents / 100).toFixed(2);
   const hours = Math.floor(preview.totalSeconds / 3600);
   const minutes = Math.floor((preview.totalSeconds % 3600) / 60);
   const durationLabel = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 
-  const remainingCents =
-    usage?.usage?.remainingUsd != null
-      ? Math.round(usage.usage.remainingUsd * 100)
-      : null;
-  const willOverrun =
-    remainingCents != null && preview.estimatedCostCents > remainingCents;
-  const afterCents =
-    remainingCents != null
-      ? Math.max(0, remainingCents - preview.estimatedCostCents)
-      : null;
+  // Sanity: would this batch overrun the user's credit? Warn if so.
+  const willOverrun = usage
+    ? preview.estimatedCostCents > usage.remainingCents
+    : false;
+
+  const afterCents = usage
+    ? Math.max(0, usage.remainingCents - preview.estimatedCostCents)
+    : null;
 
   return (
     <div
@@ -324,36 +296,29 @@ function ConfirmModal({
         onClick={(e) => e.stopPropagation()}
       >
         <header>
-          <h2 className="text-lg font-semibold">Transcribe all via Apify</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Sends every missing video through Apify&apos;s residential-proxy
-            transcript actor. Videos without captions or voice are skipped
-            (no charge for those). Runs in the background — you can leave
-            this page.
-          </p>
+          <h2 className="text-lg font-semibold">{t.deepgram.modalTitle}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{t.deepgram.modalSubtitle}</p>
         </header>
 
         <dl className="space-y-1.5 rounded-md border border-border bg-muted/30 p-3 text-sm">
-          <Row label="Videos to transcribe" value={String(preview.missing)} />
-          <Row label="Total audio duration" value={durationLabel} />
+          <Row label={t.deepgram.modalRowVideos} value={String(preview.missing)} />
+          <Row label={t.deepgram.modalRowDuration} value={durationLabel} />
           <Row
-            label="Estimated cost"
+            label={t.deepgram.modalRowCost}
             value={`~$${costUsd}`}
             valueClass="font-semibold"
           />
-          {remainingCents != null && (
+          {usage && (
             <>
               <Row
-                label="Apify credit remaining"
-                value={`$${(remainingCents / 100).toFixed(2)}`}
+                label={t.deepgram.modalRowRemaining}
+                value={`$${(usage.remainingCents / 100).toFixed(2)}`}
               />
               {afterCents !== null && (
                 <Row
-                  label="After this batch"
+                  label={t.deepgram.modalRowAfter}
                   value={`$${(afterCents / 100).toFixed(2)}`}
-                  valueClass={cn(
-                    willOverrun && "text-destructive font-semibold"
-                  )}
+                  valueClass={cn(willOverrun && "text-destructive font-semibold")}
                 />
               )}
             </>
@@ -362,16 +327,14 @@ function ConfirmModal({
 
         {willOverrun && (
           <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
-            Estimated cost exceeds your remaining Apify credit. Continue
-            anyway and Apify will start billing you per-run after the free
-            allowance runs out.
+            {t.deepgram.overrunWarning}
           </div>
         )}
 
         {preview.videos.length > 0 && (
           <details className="text-xs">
             <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-              First few in the queue
+              {t.deepgram.firstFew}
             </summary>
             <ul className="mt-1.5 space-y-1">
               {preview.videos.map((v) => (
@@ -385,11 +348,11 @@ function ConfirmModal({
 
         <div className="flex items-center justify-end gap-2">
           <Button variant="outline" size="sm" onClick={onClose} disabled={starting}>
-            Cancel
+            {t.deepgram.cancel}
           </Button>
           <Button size="sm" onClick={onConfirm} disabled={starting} className="gap-2">
             {starting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            Start batch
+            {t.deepgram.confirm}
           </Button>
         </div>
       </div>

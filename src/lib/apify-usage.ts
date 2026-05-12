@@ -22,13 +22,16 @@ export type ApifyUsageSnapshot = {
   monthlyUsedUsd: number | null;
   remainingUsd: number | null;
   percentageUsed: number | null;
-  // Rough estimate — Apify YouTube Transcript actor averages ~$0.02
-  // per video at the time of writing. Calibrate later if it drifts.
-  estimatedTranscriptsRemaining: number | null;
+  // Rough estimate — Apify YouTube channel-scrape actor averages
+  // ~$0.05 per channel-fetch at the time of writing (~50-100 videos
+  // with their metadata + captions). Calibrate if it drifts.
+  // Transcription itself is on Deepgram in this fork — this snapshot
+  // exists for the competitor-scrape side of Apify use only.
+  estimatedScrapesRemaining: number | null;
   cycleEndAt: string | null;
 };
 
-const TRANSCRIPT_AVG_COST_USD = 0.02;
+const SCRAPE_AVG_COST_USD = 0.05;
 
 function safeNumber(x: unknown): number | null {
   if (typeof x === "number" && Number.isFinite(x)) return x;
@@ -110,23 +113,23 @@ export async function getApifyUsage(apiKey: string): Promise<ApifyUsageSnapshot 
 
   let percentageUsed: number | null = null;
   let remainingUsd: number | null = null;
-  let estimatedTranscriptsRemaining: number | null = null;
+  let estimatedScrapesRemaining: number | null = null;
   if (monthlyAllowanceUsd && monthlyAllowanceUsd > 0 && monthlyUsedUsd !== null) {
     percentageUsed = Math.min(
       100,
       Math.max(0, Math.round((monthlyUsedUsd / monthlyAllowanceUsd) * 100))
     );
     remainingUsd = Math.max(0, monthlyAllowanceUsd - monthlyUsedUsd);
-    estimatedTranscriptsRemaining = Math.floor(
-      remainingUsd / TRANSCRIPT_AVG_COST_USD
+    estimatedScrapesRemaining = Math.floor(
+      remainingUsd / SCRAPE_AVG_COST_USD
     );
   } else if (monthlyAllowanceUsd && monthlyUsedUsd === null) {
     // Fallback: we know the allowance but not usage — assume nothing
     // spent yet so the bar shows full instead of empty. Better signal
     // than refusing to render.
     remainingUsd = monthlyAllowanceUsd;
-    estimatedTranscriptsRemaining = Math.floor(
-      monthlyAllowanceUsd / TRANSCRIPT_AVG_COST_USD
+    estimatedScrapesRemaining = Math.floor(
+      monthlyAllowanceUsd / SCRAPE_AVG_COST_USD
     );
     percentageUsed = 0;
   }
@@ -137,7 +140,7 @@ export async function getApifyUsage(apiKey: string): Promise<ApifyUsageSnapshot 
     monthlyUsedUsd,
     remainingUsd,
     percentageUsed,
-    estimatedTranscriptsRemaining,
+    estimatedScrapesRemaining,
     cycleEndAt,
   };
 }

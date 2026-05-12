@@ -23,6 +23,7 @@ import {
   titleLengthBuckets,
   titleWordStats,
   topVsBottomTitles,
+  recordDeepgramUsage,
   upsertTranscript,
   videoStats,
 } from "./db";
@@ -35,7 +36,8 @@ import {
   youtubeSuggest,
 } from "./youtube";
 import { exaGetContents, exaSearch } from "./exa";
-import { apifyYouTubeScrape, apifyYouTubeTranscript } from "./apify";
+import { apifyYouTubeScrape } from "./apify";
+import { transcribeYouTubeVideo } from "./deepgram";
 import { runSelect, SQL_SCHEMA } from "./sql-tool";
 import {
   fetchChannelOverview,
@@ -300,7 +302,7 @@ const APIFY_TOOLS: Tool[] = [
   {
     name: "get_youtube_transcript",
     description:
-      "Fetch transcript(s) of one or more YouTube videos via Apify. Caches the result into the local transcripts DB when the video exists there.",
+      "Transcribe one or more YouTube videos via Deepgram (yt-dlp pulls audio locally, streams to Deepgram). Caches results into the local transcripts DB. Costs ≈$0.0043/min against the user's Deepgram credit.",
     input_schema: {
       type: "object",
       properties: {
@@ -732,16 +734,55 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
       // google_trends_* cases removed — the underlying scraper consistently
       // returns 429 and the tools aren't exposed to Claude anymore.
       case "get_youtube_transcript": {
-        const key = requireKey("apify");
+        const key = requireKey("deepgram");
         const urls = Array.isArray(input.videoUrls)
           ? (input.videoUrls as unknown[]).filter((u): u is string => typeof u === "string").slice(0, 10)
           : [];
         if (!urls.length) return { ok: false, error: "videoUrls required" };
-        const results = await apifyYouTubeTranscript(urls, key);
-        // Cache into DB for any video IDs we recognize
-        for (const r of results) {
-          const m = /(?:youtu\.be\/|v=)([A-Za-z0-9_-]{11})/.exec(r.url);
-          if (m && r.transcript) upsertTranscript(m[1], r.transcript, r.language ?? null);
+        // Extract the 11-char videoId from each URL and run Deepgram on
+        // each in series. Sequential rather than parallel because (a)
+        // yt-dlp + Deepgram per video is bursty CPU/network and we'd
+        // rather not slam the local machine, and (b) Deepgram pre-recorded
+        // tier limits concurrent jobs anyway.
+        const results: Array<{
+          url: string;
+          videoId: string | null;
+          transcript: string;
+          language: string | null;
+          error?: string;
+        }> = [];
+        for (const url of urls) {
+          const m = /(?:youtu\.be\/|v=)([A-Za-z0-9_-]{11})/.exec(url);
+          const videoId = m ? m[1] : null;
+          if (!videoId) {
+            results.push({ url, videoId: null, transcript: "", language: null, error: "could not extract videoId from URL" });
+            continue;
+          }
+          // Serve from cache if we already have it — same DB the UI uses.
+          const cached = getTranscript(videoId);
+          if (cached) {
+            results.push({ url, videoId, transcript: cached.text, language: cached.language });
+            continue;
+          }
+          try {
+            const r = await transcribeYouTubeVideo(videoId, key);
+            upsertTranscript(videoId, r.text, r.language);
+            recordDeepgramUsage({
+              videoId,
+              durationSeconds: r.durationSeconds,
+              costCents: r.costCents,
+              model: r.model,
+            });
+            results.push({ url, videoId, transcript: r.text, language: r.language });
+          } catch (err) {
+            results.push({
+              url,
+              videoId,
+              transcript: "",
+              language: null,
+              error: err instanceof Error ? err.message : "transcription failed",
+            });
+          }
         }
         return { ok: true, data: results };
       }
