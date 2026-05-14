@@ -2945,9 +2945,15 @@ export function competitorGapAnalysis(opts: { topN?: number } = {}): Array<{
   exampleCompetitorTitle: string;
 }> {
   const top = opts.topN ?? 25;
-  const ownTitles = db
-    .prepare(`SELECT title FROM videos`)
-    .all() as { title: string }[];
+  // "Own" titles must be the ACTIVE channel only — otherwise we'd mix
+  // in titles from a different connected channel and call them "ours",
+  // hiding gap-words that are actually opportunities for THIS channel.
+  const activeId = getActiveChannelId();
+  const ownTitles = activeId
+    ? (db
+        .prepare(`SELECT title FROM videos WHERE channel_id = ?`)
+        .all(activeId) as { title: string }[])
+    : [];
   const ownWords = new Set<string>();
   for (const r of ownTitles) {
     for (const w of tokeniseTitle(r.title)) ownWords.add(w);
@@ -3130,16 +3136,23 @@ export function listHooksWithVideos(opts: {
       : opts.orderBy === "recent"
         ? "v.published_at DESC"
         : "h.overall_score DESC";
-  const where = opts.formula ? "WHERE h.formula_type = ?" : "";
-  const args: unknown[] = [];
-  if (opts.formula) args.push(opts.formula);
+  // Always scope to the active channel — the dashboard / chat user
+  // expects "the hooks on MY current channel", not a cross-channel pool.
+  const activeId = getActiveChannelId();
+  if (!activeId) return [];
+  const whereParts: string[] = ["v.channel_id = ?"];
+  const args: unknown[] = [activeId];
+  if (opts.formula) {
+    whereParts.push("h.formula_type = ?");
+    args.push(opts.formula);
+  }
   args.push(opts.limit ?? 200);
   return db
     .prepare(
       `SELECT h.*, v.title, v.views, v.published_at, v.thumbnail_url
        FROM video_hooks h
        JOIN videos v ON v.id = h.video_id
-       ${where}
+       WHERE ${whereParts.join(" AND ")}
        ORDER BY ${order}
        LIMIT ?`
     )
@@ -3157,6 +3170,8 @@ export function hookFormulaStats(): Array<{
   avgViews: number;
   avgScore: number;
 }> {
+  const activeId = getActiveChannelId();
+  if (!activeId) return [];
   return db
     .prepare(
       `SELECT
@@ -3166,10 +3181,11 @@ export function hookFormulaStats(): Array<{
          ROUND(AVG(h.overall_score), 1) AS avgScore
        FROM video_hooks h
        JOIN videos v ON v.id = h.video_id
+       WHERE v.channel_id = ?
        GROUP BY h.formula_type
        ORDER BY avgViews DESC`
     )
-    .all() as Array<{
+    .all(activeId) as Array<{
     formula: HookFormula;
     count: number;
     avgViews: number;
@@ -3183,14 +3199,35 @@ export function hookOverallStats(): {
   avgScore: number;
   topFormula: HookFormula | null;
 } {
-  const analyzed =
-    (db.prepare(`SELECT COUNT(*) AS n FROM video_hooks`).get() as { n: number })
-      .n;
-  const totalVideos =
-    (db.prepare(`SELECT COUNT(*) AS n FROM videos`).get() as { n: number }).n;
+  const activeId = getActiveChannelId();
+  if (!activeId) {
+    return { analyzed: 0, totalVideos: 0, avgScore: 0, topFormula: null };
+  }
+  // Both counts and the avg must be channel-scoped — otherwise we'd
+  // mix hooks/videos from every connected channel into a single number.
+  const analyzed = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM video_hooks h
+         JOIN videos v ON v.id = h.video_id
+         WHERE v.channel_id = ?`
+      )
+      .get(activeId) as { n: number }
+  ).n;
+  const totalVideos = (
+    db
+      .prepare(`SELECT COUNT(*) AS n FROM videos WHERE channel_id = ?`)
+      .get(activeId) as { n: number }
+  ).n;
   const avgRow = db
-    .prepare(`SELECT ROUND(AVG(overall_score), 1) AS avg FROM video_hooks`)
-    .get() as { avg: number | null } | undefined;
+    .prepare(
+      `SELECT ROUND(AVG(h.overall_score), 1) AS avg
+       FROM video_hooks h
+       JOIN videos v ON v.id = h.video_id
+       WHERE v.channel_id = ?`
+    )
+    .get(activeId) as { avg: number | null } | undefined;
   const formulas = hookFormulaStats();
   return {
     analyzed,
@@ -3264,9 +3301,15 @@ export type FormulaWordStat = {
 export function titleWordStats(opts: { minUses?: number; topN?: number } = {}): FormulaWordStat[] {
   const minUses = opts.minUses ?? 2;
   const topN = opts.topN ?? 60;
+  const activeId = getActiveChannelId();
+  if (!activeId) return [];
   const rows = db
-    .prepare(`SELECT title, views FROM videos WHERE title IS NOT NULL`)
-    .all() as { title: string; views: number }[];
+    .prepare(
+      `SELECT title, views
+       FROM videos
+       WHERE title IS NOT NULL AND channel_id = ?`
+    )
+    .all(activeId) as { title: string; views: number }[];
   if (rows.length === 0) return [];
 
   // Channel median — used as the "did this video over-perform?" baseline.
@@ -3329,9 +3372,22 @@ export function titleLengthBuckets(): Array<{
   videos: number;
   avgViews: number;
 }> {
+  const activeId = getActiveChannelId();
+  if (!activeId) {
+    return [
+      { bucket: "≤ 8 words", videos: 0, avgViews: 0 },
+      { bucket: "9–12 words", videos: 0, avgViews: 0 },
+      { bucket: "13–16 words", videos: 0, avgViews: 0 },
+      { bucket: "17+ words", videos: 0, avgViews: 0 },
+    ];
+  }
   const rows = db
-    .prepare(`SELECT title, views FROM videos WHERE title IS NOT NULL`)
-    .all() as { title: string; views: number }[];
+    .prepare(
+      `SELECT title, views
+       FROM videos
+       WHERE title IS NOT NULL AND channel_id = ?`
+    )
+    .all(activeId) as { title: string; views: number }[];
   const buckets = {
     "≤ 8 words": [] as number[],
     "9–12 words": [] as number[],
@@ -3364,11 +3420,16 @@ export function topVsBottomTitles(): {
   top: Array<{ id: string; title: string; views: number }>;
   bottom: Array<{ id: string; title: string; views: number }>;
 } {
+  const activeId = getActiveChannelId();
+  if (!activeId) return { top: [], bottom: [] };
   const all = db
     .prepare(
-      `SELECT id, title, views FROM videos WHERE title IS NOT NULL ORDER BY views DESC`
+      `SELECT id, title, views
+       FROM videos
+       WHERE title IS NOT NULL AND channel_id = ?
+       ORDER BY views DESC`
     )
-    .all() as { id: string; title: string; views: number }[];
+    .all(activeId) as { id: string; title: string; views: number }[];
   if (all.length === 0) return { top: [], bottom: [] };
   const top = all.slice(0, Math.min(10, all.length));
   const bottom = all.slice(Math.max(0, all.length - 10)).reverse();

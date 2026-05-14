@@ -11,6 +11,7 @@ import {
   getVideoHook,
   hookFormulaStats,
   hookOverallStats,
+  listAllChannels,
   listCompetitorAlerts,
   listCompetitors,
   listHooksLibrary,
@@ -1026,6 +1027,10 @@ export function buildSystemPrompt(
 ): string {
   const channel = getChannel();
   const bound = getSetting("youtube.channelId");
+  // Pull the full list of connected channels too — when the user has
+  // more than one, we have to make it crystal clear which one is
+  // currently active, otherwise Claude has historically confused them.
+  const allChannels = listAllChannels();
   const lines: string[] = [
     `You are "YT Channel AI", an expert YouTube growth strategist embedded in a local desktop app used by content creators and their teams.`,
     ``,
@@ -1043,9 +1048,23 @@ export function buildSystemPrompt(
   ];
   if (channel) {
     lines.push(
-      `- Bound channel (the creator's OWN channel): "${channel.title ?? "(unknown)"}"${channel.handle ? ` (${channel.handle})` : ""}`,
-      `- Subscribers: ${channel.subscriber_count ?? "?"}, total views: ${channel.view_count ?? "?"}, videos: ${channel.video_count ?? "?"}`,
-      `- When the user says "my channel" they mean THIS one. When they ask about a different @handle or channel name, use external tools (Exa / Apify / youtube search) — do NOT confuse it with the bound channel's local data.`
+      `- **Active channel** (this is the one every local-DB tool is scoped to right now): "${channel.title ?? "(unknown)"}"${channel.handle ? ` — ${channel.handle}` : ""}, id \`${channel.id}\``,
+      `- Subscribers: ${channel.subscriber_count ?? "?"}, total views: ${channel.view_count ?? "?"}, videos in DB: ${channel.video_count ?? "?"}`,
+      `- When the user says "my channel" they mean THIS one — never another channel from the list below.`
+    );
+    if (allChannels.length > 1) {
+      const others = allChannels
+        .filter((c) => c.id !== channel.id)
+        .map((c) => `"${c.title ?? c.id}"${c.handle ? ` (${c.handle})` : ""}`)
+        .join(", ");
+      lines.push(
+        `- The user has **${allChannels.length} channels connected** in this app. Other connected channels (NOT active right now): ${others}.`,
+        `- **CRITICAL multi-channel rule:** every local-DB tool (list_videos, search_transcripts, search_comments, video_stats, hooks_*, formula_*, raw_sql, etc.) returns data from the ACTIVE channel only. The other channels' videos/transcripts/comments are NOT visible to these tools until the user switches the active channel. If the user asks "ideas based on our channel" or "what's worked for us", that always means the ACTIVE channel — never an aggregate across all of them, and never a different one.`,
+        `- If the user names a specific channel by handle/title that matches one of their OTHER connected channels, tell them to switch to it in the sidebar first. Do not silently answer with the active channel's data and pretend it's the other one.`
+      );
+    }
+    lines.push(
+      `- When the user asks about a channel that is NOT in the connected list (a competitor, a reference channel they admire), use external tools (Exa / Apify / youtube search) — do NOT confuse it with the active channel's local data.`
     );
   } else if (bound) {
     lines.push(`- A channel is bound (${bound}) but not yet synced — suggest running a sync.`);
