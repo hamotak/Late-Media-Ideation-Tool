@@ -8,8 +8,6 @@ import {
   Video,
   TrendingUp,
   Upload,
-  Award,
-  Flame,
   ChevronDown,
   ChevronUp,
   Zap,
@@ -31,7 +29,6 @@ import { ConnectBanner } from "@/components/connect-banner";
 import { StudioOverview } from "@/components/studio-overview";
 import { TodaysEarnings } from "@/components/todays-earnings";
 import { MultiChannelEarnings } from "@/components/multi-channel-earnings";
-import { EditorBillingCard } from "@/components/editor-billing-card";
 import { TagsOverview } from "@/components/tags-overview";
 import { DashboardTabs } from "@/components/dashboard-tabs";
 import { AllChannelsOverview } from "@/components/all-channels-overview";
@@ -208,7 +205,6 @@ export default function DashboardPage() {
           <MultiChannelEarnings key={`mc-${refreshKey}`} />
           <TagsOverview key={`tg-${refreshKey}`} />
           <TodaysEarnings key={`te-${refreshKey}`} />
-          <EditorBillingCard key={`eb-${refreshKey}`} />
         </>
       )}
 
@@ -252,30 +248,6 @@ export default function DashboardPage() {
         </Card>
       ) : viewMode === "channel" && hasData ? (
         <>
-          <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {aggregates?.topByViews?.length ? (
-              <VideoListCard
-                title={t.dashboard.topByViews}
-                description={t.dashboard.topByViewsDesc}
-                icon={Award}
-                accent="text-amber-500"
-                videos={aggregates.topByViews}
-                metricKey="views"
-              />
-            ) : null}
-
-            {aggregates?.topByEngagement?.length ? (
-              <VideoListCard
-                title={t.dashboard.topByEngagement}
-                description={t.dashboard.topByEngagementDesc}
-                icon={Flame}
-                accent="text-rose-500"
-                videos={aggregates.topByEngagement}
-                metricKey="engagement"
-              />
-            ) : null}
-          </div>
-
           <Card className="mb-4">
             <CardHeader
               className="cursor-pointer"
