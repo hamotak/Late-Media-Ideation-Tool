@@ -23,9 +23,9 @@ import { useI18n } from "@/lib/i18n/provider";
 import { ConnectBanner } from "@/components/connect-banner";
 import { StudioOverview } from "@/components/studio-overview";
 import { TodaysEarnings } from "@/components/todays-earnings";
-import { MultiChannelEarnings } from "@/components/multi-channel-earnings";
 import { ViewsOverTime } from "@/components/views-over-time";
 import { TagsOverview } from "@/components/tags-overview";
+import { SingleChannelEarnings } from "@/components/single-channel-earnings";
 import { AllChannelsOverview } from "@/components/all-channels-overview";
 import { cn } from "@/lib/utils";
 
@@ -162,18 +162,32 @@ export default function DashboardPage() {
 
       <ConnectBanner />
 
-      {/* Cross-channel summary view */}
-      {viewMode === "all" && <AllChannelsOverview key={`all-${refreshKey}`} />}
+      {/* Cross-channel summary view. AllChannelsOverview already nests
+          MultiChannelEarnings inside itself, so the combined revenue card
+          renders here without a second mount. TagsOverview is cross-channel
+          by design (it sums revenue across every channel carrying each
+          tag) so it belongs in this branch too. */}
+      {viewMode === "all" && (
+        <>
+          <AllChannelsOverview key={`all-${refreshKey}`} />
+          <TagsOverview key={`tg-${refreshKey}`} />
+        </>
+      )}
 
       {/* Per-channel widgets — hidden when "All channels" tab is active.
           `key={refreshKey}` forces a full re-mount when the user clicks
           Refresh, so each widget re-runs its useEffect and re-fetches
-          freshly (after the server-side analytics cache was busted). */}
+          freshly (after the server-side analytics cache was busted).
+          SingleChannelEarnings is the single-channel sibling of
+          MultiChannelEarnings — its title shows the channel name and
+          every number is scoped to that channel via /api/analytics/revenue. */}
       {viewMode === "channel" && channel && (
         <>
-          <MultiChannelEarnings key={`mc-${refreshKey}`} />
+          <SingleChannelEarnings
+            key={`sce-${channel.id}-${refreshKey}`}
+            channelTitle={channel.title ?? "This channel"}
+          />
           <ViewsOverTime key={`vo-${refreshKey}`} />
-          <TagsOverview key={`tg-${refreshKey}`} />
           <TodaysEarnings key={`te-${refreshKey}`} />
         </>
       )}
