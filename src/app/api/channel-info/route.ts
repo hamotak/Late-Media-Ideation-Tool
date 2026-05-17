@@ -24,7 +24,8 @@ type WireField =
   | "positioning"
   | "audience"
   | "voice"
-  | "externalSources";
+  | "externalSources"
+  | "ideationRules";
 
 const WIRE_TO_DB: Record<WireField, ChannelContextField> = {
   niche: "niche",
@@ -32,6 +33,7 @@ const WIRE_TO_DB: Record<WireField, ChannelContextField> = {
   audience: "audience",
   voice: "voice",
   externalSources: "external_sources",
+  ideationRules: "ideation_rules",
 };
 
 const WIRE_FIELDS = Object.keys(WIRE_TO_DB) as WireField[];
@@ -47,6 +49,7 @@ type ChannelContextWire = {
   audience: string;
   voice: string;
   externalSources: string;
+  ideationRules: string;
 };
 
 function toWire(c: Channel): ChannelContextWire {
@@ -61,6 +64,7 @@ function toWire(c: Channel): ChannelContextWire {
     audience: c.audience ?? "",
     voice: c.voice ?? "",
     externalSources: c.external_sources ?? "",
+    ideationRules: c.ideation_rules ?? "",
   };
 }
 

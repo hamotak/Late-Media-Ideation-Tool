@@ -3,7 +3,6 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   competitorMedianViews,
   getCompetitorVideosByIds,
-  getExampleVideosForFormat,
   getIntegration,
   listAllChannels,
   listChannelMemory,
@@ -20,7 +19,9 @@ import { getFormatsForChannel } from "./outlier-formats";
 import { log } from "./logger";
 import {
   checkTopicFrequency,
+  findTopicSimilarOutliers,
   type TopicFrequencyResult,
+  type TopicSimilarMatch,
   validateIdeaAgainstOwnCatalog,
   type ValidateResult,
 } from "./validate-idea";
@@ -135,16 +136,13 @@ export type ProposedIdea = {
     competitorHandle: string | null;
     performanceBand: PerformanceBand;
   }>;
-  // Up to 2 OTHER outliers exemplifying the same format (excluding any id
-  // in sourceTopicOutliers). Drives the "Other outliers in this format"
-  // block in the agent's structured markdown output.
-  otherFormatExamples: Array<{
-    videoId: string;
-    title: string;
-    thumbnailUrl: string | null;
-    multiplier: number;
-    performanceBand: PerformanceBand;
-  }>;
+  // Up to 3 OTHER competitor outliers covering the SAME TOPIC (token
+  // overlap on the topicLabel), excluding any id in sourceTopicOutliers.
+  // Replaces the prior otherFormatExamples block, which showed format
+  // siblings — useful for proving the SHAPE but irrelevant when the
+  // user wants to see who else covered the SAME TOPIC and how hard it
+  // hit. Falls back to [] when no cross-channel topic siblings exist.
+  topicSimilarOutliers: TopicSimilarMatch[];
   topicLabel: string;
   proposedTitle: string;
   angle: string;
@@ -194,6 +192,10 @@ type ChannelCtx = {
   audience?: string;
   voice?: string;
   external_sources?: string;
+  // T9 — HAmo-authored hard-enforcement rules. Injected verbatim into
+  // the compose system prompt; the model treats them as non-negotiable
+  // (above format/topic fit, originality drift, etc).
+  ideation_rules?: string;
 };
 
 type FormatLite = {
@@ -398,6 +400,7 @@ export async function generateIdeasForChannel(opts: {
     sec7,
     sec9,
     bannedTopics,
+    ideationRules: (ctx.ideation_rules ?? "").trim(),
   });
 
   const userBody = buildUserBodyForCompose({
@@ -833,29 +836,22 @@ export async function generateIdeasForChannel(opts: {
   );
 
   // --- 5. Validate each surviving idea against own catalog + hydrate
-  //        secondary citation block (otherFormatExamples) ----------------
+  //        the "Same topic across competitors" block. Replaces the prior
+  //        otherFormatExamples (format siblings) — users want to see
+  //        who else covered the SAME TOPIC and how hard it hit, not
+  //        more videos using the same shape.
   const ideas: ProposedIdea[] = surviving.map((a) => {
     const fmt = formatById.get(a.sourceFormatId);
     const validation = validateIdeaAgainstOwnCatalog({
       topic: a.topicLabel,
       userChannelId,
     });
-    // Other outliers exemplifying THIS format, excluding any video that
-    // already appears in the idea's sources (avoid duplicate citations).
     const sourceIds = new Set(a.sources.map((s) => s.videoId));
-    const otherFormatExamples = getExampleVideosForFormat(a.sourceFormatId, 5)
-      .filter((e) => !sourceIds.has(e.videoId))
-      .slice(0, 2)
-      .map((e) => {
-        const m = Math.round((e.multiplierAtExtract || 0) * 10) / 10;
-        return {
-          videoId: e.videoId,
-          title: e.title,
-          thumbnailUrl: e.thumbnailUrl ?? ytThumbnail(e.videoId),
-          multiplier: m,
-          performanceBand: performanceBandFor(m),
-        };
-      });
+    const topicSimilarOutliers = findTopicSimilarOutliers(
+      a.topicLabel,
+      userChannelId,
+      { limit: 3, excludeVideoIds: [...sourceIds] }
+    );
     return {
       sourceOutlierVideoId: a.sources[0]?.videoId ?? "",
       sourceFormat: {
@@ -876,7 +872,7 @@ export async function generateIdeasForChannel(opts: {
           performanceBand: performanceBandFor(m),
         };
       }),
-      otherFormatExamples,
+      topicSimilarOutliers,
       topicLabel: a.topicLabel,
       proposedTitle: a.proposedTitle,
       angle: a.angle,
@@ -921,6 +917,7 @@ function buildSystemPromptForCompose(opts: {
   sec7: string;
   sec9: string;
   bannedTopics: string[];
+  ideationRules: string;
 }): string {
   const bannedBlock =
     opts.bannedTopics.length > 0
@@ -931,6 +928,19 @@ function buildSystemPromptForCompose(opts: {
           "",
         ]
       : [];
+  // T9 — per-channel HAmo-authored ideation rules. Injected verbatim
+  // (no rewriting, no summarisation). These rules sit ABOVE format/topic
+  // fit in priority: if a rule says "every title must include a number",
+  // a title without a number is wrong, even if it's the most original
+  // composition the model can produce.
+  const ideationRulesBlock = opts.ideationRules
+    ? [
+        "# PER-CHANNEL IDEATION RULES (HAmo-authored, HARD enforcement)",
+        "The creator has set these rules for THIS channel. They override every other compose heuristic. A title that violates any rule below MUST be regenerated or dropped — do NOT compromise the rule to ship the title.",
+        opts.ideationRules,
+        "",
+      ]
+    : [];
   return [
     "You compose NEW YouTube video titles by APPLYING trending title formats to currently-viral topics. The format is a structural skeleton; the topic is the subject. Your job is to glue them — never to paraphrase a source outlier's specific phrasing.",
     "",
@@ -947,6 +957,7 @@ function buildSystemPromptForCompose(opts: {
     `Every proposedTitle MUST land in 50-80 characters (ideal 50-70). Titles over 80 chars are regenerated once then dropped if still over. Titles under ${TITLE_LEN_DROP_FLOOR} are dropped outright.`,
     "",
     ...bannedBlock,
+    ...ideationRulesBlock,
     "From MENTOR_METHOD.md §1 (Competitor mapping — the B&S Method):",
     opts.sec1 || "(section unavailable)",
     "",

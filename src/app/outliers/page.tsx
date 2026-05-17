@@ -340,6 +340,11 @@ function RecentTab({ scope }: { scope: string | "all" | null }) {
   const [windowKey, setWindowKey] = useState<AlertWindow>("all");
   const [minMult, setMinMult] = useState<number>(2);
   const [openOutlier, setOpenOutlier] = useState<Outlier | null>(null);
+  // T7: optimistic-hide state. videoId keys keep this aligned with the
+  // POST body shape and the row's own identity column.
+  const [pendingHideIds, setPendingHideIds] = useState<Set<string>>(
+    new Set()
+  );
 
   // Preserve the per-browser filter the old /competitors Alerts tab used.
   // Guard at 1.5 so a stale "1" from before the 1× pill was dropped snaps
@@ -391,11 +396,26 @@ function RecentTab({ scope }: { scope: string | "all" | null }) {
     await refresh();
   };
 
+  // T7: optimistic hide. Replaced window.confirm with fade-out:
+  //   1) mark videoId pending → row fades to opacity-0 (200ms)
+  //   2) POST in parallel
+  //   3) on success → remove from local list
+  //   4) on error   → drop the id from pending (row springs back),
+  //                   surface a transient error banner
+  // Undo lives in the future Settings → Hidden outliers page; an
+  // accidental hide is recoverable there.
   const hideOutlier = async (videoId: string, competitorId: number) => {
-    const ok = window.confirm(
-      "Hide this outlier? It'll disappear from /outliers, Trending Formats extraction, Topics Gap, and chat results. Restore from Settings → Hidden outliers (coming soon)."
-    );
-    if (!ok) return;
+    setError(null);
+    setPendingHideIds((prev) => {
+      const next = new Set(prev);
+      next.add(videoId);
+      return next;
+    });
+    window.setTimeout(() => {
+      setAlerts((prev) =>
+        prev ? prev.filter((a) => a.video_id !== videoId) : prev
+      );
+    }, 200);
     try {
       const r = await fetch("/api/outliers/hide", {
         method: "POST",
@@ -405,11 +425,20 @@ function RecentTab({ scope }: { scope: string | "all" | null }) {
       if (!r.ok) {
         const d = (await r.json().catch(() => ({}))) as { error?: string };
         setError(d.error ?? `HTTP ${r.status}`);
+        // Re-fetch is the cleanest restore — splicing the row back at
+        // its old sort position would need stale state to be reliable.
+        await refresh();
         return;
       }
-      await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to hide.");
+      await refresh();
+    } finally {
+      setPendingHideIds((prev) => {
+        const next = new Set(prev);
+        next.delete(videoId);
+        return next;
+      });
     }
   };
 
@@ -552,6 +581,7 @@ function RecentTab({ scope }: { scope: string | "all" | null }) {
               competitorHandle={a.competitor_handle}
               tier={a.competitor_tier}
               isUnread={!a.read_at}
+              pending={pendingHideIds.has(a.video_id)}
               onMarkRead={() => markRead(a.id)}
               onExplain={() => setOpenOutlier(alertToOutlier(a))}
               onHide={() => hideOutlier(a.video_id, a.competitor_id)}
@@ -861,6 +891,10 @@ type OutlierRowProps = {
   detectedAt?: number | null;
   durationSeconds?: number | null;
   isUnread?: boolean;
+  // T7: optimistic-hide fade. Parent flips this true the moment the
+  // user clicks X; the row fades to 0 opacity over 200ms before the
+  // parent removes it from the list entirely.
+  pending?: boolean;
   onExplain?: () => void;
   onMarkRead?: () => void;
   onHide?: () => void;
@@ -875,13 +909,14 @@ function OutlierRow(props: OutlierRowProps) {
   const clickable = !!props.onExplain;
   return (
     <li
-      onClick={clickable ? props.onExplain : undefined}
+      onClick={clickable && !props.pending ? props.onExplain : undefined}
       className={cn(
-        "group flex flex-wrap items-start gap-3 rounded-md border p-3 transition-colors",
+        "group flex flex-wrap items-start gap-3 rounded-md border p-3 transition-all duration-200",
         props.isUnread
           ? "border-amber-500/40 bg-amber-500/5"
           : "border-border bg-background",
-        clickable && "cursor-pointer hover:bg-accent/40"
+        clickable && !props.pending && "cursor-pointer hover:bg-accent/40",
+        props.pending && "pointer-events-none opacity-0"
       )}
     >
       {props.thumbnailUrl && (
@@ -1147,6 +1182,11 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [extractStatus, setExtractStatus] = useState<string | null>(null);
+  // T6: optimistic-ban state. Format ids in `pendingBanIds` fade to
+  // opacity-0; on confirm they disappear from the local list. On HTTP
+  // error we drop the id from the set so the row springs back.
+  const [pendingBanIds, setPendingBanIds] = useState<Set<number>>(new Set());
+  const [banError, setBanError] = useState<string | null>(null);
 
   // Resolve concrete channel id (Patterns is per-channel — "all" mode
   // doesn't make sense here because formats are keyed by user_channel_id).
@@ -1235,6 +1275,48 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
     return rows;
   }, [formats, query, sortKey]);
 
+  // T6: ban handler. Mark pending → fade → 200ms later, remove from
+  // local list. POST runs in parallel; on error we restore the row and
+  // surface a transient banner. No window.confirm — accidental clicks
+  // are recoverable via the (future) Settings → Banned formats panel.
+  const banFormat = useCallback(
+    async (formatId: number) => {
+      setBanError(null);
+      setPendingBanIds((prev) => {
+        const next = new Set(prev);
+        next.add(formatId);
+        return next;
+      });
+      window.setTimeout(() => {
+        setFormats((prev) =>
+          prev ? prev.filter((f) => f.id !== formatId) : prev
+        );
+      }, 200);
+      try {
+        const r = await fetch(`/api/outlier-formats/${formatId}/ban`, {
+          method: "POST",
+        });
+        if (!r.ok) {
+          const d = (await r.json().catch(() => ({}))) as { error?: string };
+          setBanError(d.error ?? `HTTP ${r.status}`);
+          // Restore — re-fetch is safer than trying to splice the row
+          // back at its old sort position with stale state.
+          await load();
+        }
+      } catch (e) {
+        setBanError(e instanceof Error ? e.message : "Network error.");
+        await load();
+      } finally {
+        setPendingBanIds((prev) => {
+          const next = new Set(prev);
+          next.delete(formatId);
+          return next;
+        });
+      }
+    },
+    [load]
+  );
+
   return (
     <>
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
@@ -1274,6 +1356,11 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
       {extractStatus && (
         <div className="mb-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400">
           {extractStatus}
+        </div>
+      )}
+      {banError && (
+        <div className="mb-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {banError}
         </div>
       )}
 
@@ -1329,7 +1416,12 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
       ) : (
         <div className="space-y-3">
           {visible.map((f) => (
-            <FormatCard key={f.id} format={f} />
+            <FormatCard
+              key={f.id}
+              format={f}
+              pending={pendingBanIds.has(f.id)}
+              onBan={() => void banFormat(f.id)}
+            />
           ))}
           {visible.length === 0 && query && (
             <Card>
@@ -1344,12 +1436,38 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
   );
 }
 
-function FormatCard({ format }: { format: FormatRow }) {
+function FormatCard({
+  format,
+  pending,
+  onBan,
+}: {
+  format: FormatRow;
+  pending: boolean;
+  onBan: () => void;
+}) {
   return (
-    <Card>
-      <CardContent className="space-y-4 p-4">
+    <Card
+      className={cn(
+        "transition-opacity duration-200",
+        pending && "pointer-events-none opacity-0"
+      )}
+    >
+      <CardContent className="relative space-y-4 p-4">
+        {/* T6: Ban button — top-right X-circle. No window.confirm, by
+            design (operating rule: surface friction in undo, not in
+            taking the action). Optimistic fade lives on the Card. */}
+        <button
+          type="button"
+          onClick={onBan}
+          disabled={pending}
+          aria-label="Ban this format"
+          title="Ban this format — stops showing in Patterns, ideation, and chat"
+          className="absolute right-2 top-2 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-destructive disabled:opacity-50"
+        >
+          <XCircle className="h-4 w-4" />
+        </button>
         {/* Template line with blue placeholders */}
-        <div>
+        <div className="pr-8">
           <div className="break-words text-base font-semibold leading-snug">
             <TemplateLine template={format.template} />
           </div>

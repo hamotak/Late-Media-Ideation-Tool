@@ -1,14 +1,17 @@
 import "server-only";
 import type Anthropic from "@anthropic-ai/sdk";
 import {
+  banOutlierFormat,
   competitorGapAnalysis,
   deleteChannelMemory,
+  findOutlierFormatsByTemplateMatch,
   getActiveChannelId,
   getChannel,
   getChannelMemory,
   getComment,
   getCommentAnalysis,
   getIntegration,
+  getOutlierFormatById,
   getSetting,
   getTranscript,
   listAllChannels,
@@ -21,6 +24,7 @@ import {
   searchComments,
   searchTranscripts,
   recordDeepgramUsage,
+  unbanOutlierFormat,
   upsertChannelMemory,
   upsertTranscript,
   videoStats,
@@ -471,7 +475,7 @@ const STRATEGY_TOOLS: Tool[] = [
   {
     name: "generate_ideas",
     description:
-      "Compose up to 10 new YouTube video ideas via FORMAT × TOPIC ideation. Pipeline: (1) server pulls top trending formats (≥3 examples, last 60d, sorted by rising rate); (2) server pulls viral outliers (≥5× their channel median, last 14d); (3) Claude clusters outliers (asks for 12 candidates), picks the best-fit format per cluster, composes a NEW plain-language title 50-70 chars; (4) server runs five drop gates — title length (50-80 chars), banned words (regex over 11 terms per op rule 13), per-channel banned_topics (from channel_memory substring match), topic-frequency (≥2 hits in last 20 own-channel uploads), originality (≤45% token overlap with any source, ≤3 shared content nouns, ≤3 consecutive-word run). Drops surface in `dropped: [{topicLabel, proposedTitle, reason, detail}]` for the agent's Skipped research-block bullet. Failing slots get ONE regenerate attempt per gate then drop. Survivors capped at 10 by confidence. Each surviving idea includes: sourceFormat ({id,template,risingRate,exampleCount}), sourceTopicOutliers (up to 3 with multiplier + thumbnailUrl + performanceBand + competitorTitle/Handle), otherFormatExamples (2 thumbnails), topicLabel, proposedTitle, angle, confidence, originalityScore, validation (fresh/covered_*), titleLengthBand (ideal/acceptable), topicFrequencyCheck ({matches, matchedVideos}). Compatibility hedge: sourceOutlierVideoId is the first sourceTopicOutliers entry. Top-level also returns `bannedTopics: string[]` (the parsed channel_memory row) so the agent can cite it. No rate limit.",
+      "Compose up to 10 new YouTube video ideas via FORMAT × TOPIC ideation. Pipeline: (1) server pulls top trending formats (≥3 examples, last 60d, sorted by rising rate); (2) server pulls viral outliers (≥5× their channel median, last 14d); (3) Claude clusters outliers (asks for 12 candidates), picks the best-fit format per cluster, composes a NEW plain-language title 50-70 chars; (4) server runs five drop gates — title length (50-80 chars), banned words (regex over 11 terms per op rule 13), per-channel banned_topics (from channel_memory substring match), topic-frequency (≥2 hits in last 20 own-channel uploads), originality (≤45% token overlap with any source, ≤3 shared content nouns, ≤3 consecutive-word run). Drops surface in `dropped: [{topicLabel, proposedTitle, reason, detail}]` for the agent's Skipped research-block bullet. Failing slots get ONE regenerate attempt per gate then drop. Survivors capped at 10 by confidence. Each surviving idea includes: sourceFormat ({id,template,risingRate,exampleCount}), sourceTopicOutliers (up to 3 with multiplier + thumbnailUrl + performanceBand + competitorTitle/Handle), topicSimilarOutliers (up to 3 OTHER competitor videos covering the SAME TOPIC — different channels, ranked by token-overlap + multiplier — empty when no cross-channel siblings exist), topicLabel, proposedTitle, angle, confidence, originalityScore, validation (fresh/covered_*), titleLengthBand (ideal/acceptable), topicFrequencyCheck ({matches, matchedVideos}). Compatibility hedge: sourceOutlierVideoId is the first sourceTopicOutliers entry. Top-level also returns `bannedTopics: string[]` (the parsed channel_memory row) so the agent can cite it. No rate limit.",
     input_schema: {
       type: "object",
       properties: {
@@ -536,7 +540,7 @@ const STRATEGY_TOOLS: Tool[] = [
   {
     name: "update_channel_context",
     description:
-      "Update the active channel's strategic context fields — niche, positioning, audience, voice, external_sources — when the user describes the channel naturally in conversation. TWO-STEP CONFIRM IS MANDATORY. First call ALWAYS with confirm:false (or omitted) — the tool returns a diff of before/after values per field. Show that diff to the user in plain prose and ask them to reply 'yes' (apply), 'edit <field>' (revise), or 'no' (cancel). Only after they explicitly approve in chat do you call AGAIN with confirm:true and the SAME `changes` payload. NEVER call with confirm:true in the same turn as the user's initial description — the user must see and approve the diff first. The active channel is resolved server-side; you do not pass a channel id. Empty-string field values mean CLEAR that field — get explicit per-field approval before clearing anything. Each field caps at 2000 chars after trim. Returns (confirm:false): { pending:true, diff:[{field, before, after}], agentInstruction }. Returns (confirm:true): { applied:true, changedFields:string[], message }.",
+      "Update the active channel's strategic context fields — niche, positioning, audience, voice, external_sources, ideation_rules — when the user describes the channel naturally in conversation OR dictates an ideation rule (e.g. 'never propose deep-space topics', 'titles must mention a specific person'). TWO-STEP CONFIRM IS MANDATORY. First call ALWAYS with confirm:false (or omitted) — the tool returns a diff of before/after values per field. Show that diff to the user in plain prose and ask them to reply 'yes' (apply), 'edit <field>' (revise), or 'no' (cancel). Only after they explicitly approve in chat do you call AGAIN with confirm:true and the SAME `changes` payload. NEVER call with confirm:true in the same turn as the user's initial description — the user must see and approve the diff first. The active channel is resolved server-side; you do not pass a channel id. Empty-string field values mean CLEAR that field — get explicit per-field approval before clearing anything. Each field caps at 2000 chars after trim. Returns (confirm:false): { pending:true, diff:[{field, before, after}], agentInstruction }. Returns (confirm:true): { applied:true, changedFields:string[], message }.",
     input_schema: {
       type: "object",
       properties: {
@@ -550,6 +554,11 @@ const STRATEGY_TOOLS: Tool[] = [
             audience: { type: "string" },
             voice: { type: "string" },
             external_sources: { type: "string" },
+            ideation_rules: {
+              type: "string",
+              description:
+                "Per-channel HARD-enforcement rules the ideation agent injects verbatim into its compose prompt. Free-form prose. Use for non-negotiable constraints HAmo dictates (e.g. 'every title must include a number', 'never use Voyager as a topic', 'tone must mirror Late Science's voice').",
+            },
           },
         },
         confirm: {
@@ -560,6 +569,51 @@ const STRATEGY_TOOLS: Tool[] = [
         },
       },
       required: ["changes"],
+    },
+  },
+  {
+    name: "ban_format",
+    description:
+      "Soft-ban a trending title format for the active channel. After banning, the format stops appearing in the Patterns tab, the list_format_patterns chat tool, and the idea-generator's format pool. TWO-STEP CONFIRM IS MANDATORY (mirror update_channel_context). First call ALWAYS with confirm:false — the tool resolves which format to ban (by format_id OR by template_match substring), returns its template + key stats, and asks for approval. Second call with confirm:true and the SAME identifier applies the ban. NEVER call with confirm:true in the same turn as the user's initial mention. Disambiguation: if template_match matches more than one row the tool returns { requires_disambiguation:true, candidates:[{format_id, template, avg_multiplier, banned}] } — show the list to the user and ask them to pick by format_id, then retry with that exact format_id. Returns (confirm:false, single match): { pending:true, action:'ban'|'already_banned', format_id, template, agentInstruction }. Returns (confirm:true): { applied:true, format_id, template, message }. The format's stored examples are kept (the row is soft-deleted, not destroyed) so unban_format can restore it cleanly.",
+    input_schema: {
+      type: "object",
+      properties: {
+        format_id: {
+          type: "number",
+          description:
+            "Exact format id (from list_format_patterns). Preferred over template_match — use this when you have it.",
+        },
+        template_match: {
+          type: "string",
+          description:
+            "Substring (case-insensitive) of the template, used when the user describes the format in words and you don't have a format_id. Triggers disambiguation when >1 match.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Optional rationale the user gave (e.g. 'too cliché', 'we never want this shape'). Logged for audit — does not affect behavior.",
+        },
+        confirm: {
+          type: "boolean",
+          description:
+            "Always false on the first call. Set true only after explicit user approval — and then with the SAME identifier.",
+          default: false,
+        },
+      },
+    },
+  },
+  {
+    name: "unban_format",
+    description:
+      "Clear a soft-ban on a trending title format so it surfaces again in the Patterns tab, list_format_patterns, and the ideation pool. TWO-STEP CONFIRM IS MANDATORY (mirror ban_format). First call with confirm:false — tool returns the banned format's template + ban timestamp. Second call with confirm:true and the SAME identifier applies the unban. Disambiguation flow mirrors ban_format: when template_match returns multiple banned candidates, surface the list and ask the user to pick by format_id. Returns (confirm:false): { pending:true, action:'unban'|'already_active', format_id, template, agentInstruction }. Returns (confirm:true): { applied:true, format_id, template, message }.",
+    input_schema: {
+      type: "object",
+      properties: {
+        format_id: { type: "number" },
+        template_match: { type: "string" },
+        reason: { type: "string" },
+        confirm: { type: "boolean", default: false },
+      },
     },
   },
   {
@@ -1265,7 +1319,7 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
           return {
             ok: false,
             error:
-              "changes must be an object with at least one of: niche, positioning, audience, voice, external_sources.",
+              "changes must be an object with at least one of: niche, positioning, audience, voice, external_sources, ideation_rules.",
           };
         }
         const changesObj = rawChanges as Record<string, unknown>;
@@ -1275,6 +1329,7 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
           "audience",
           "voice",
           "external_sources",
+          "ideation_rules",
         ] as const;
         type CtxField = (typeof allowedFields)[number];
         const cleaned: Partial<Record<CtxField, string>> = {};
@@ -1300,7 +1355,7 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
           return {
             ok: false,
             error:
-              "changes must include at least one of: niche, positioning, audience, voice, external_sources.",
+              "changes must include at least one of: niche, positioning, audience, voice, external_sources, ideation_rules.",
           };
         }
 
@@ -1490,6 +1545,189 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
           },
         };
       }
+      case "ban_format":
+      case "unban_format": {
+        const activeId = getActiveChannelId();
+        if (!activeId) {
+          return {
+            ok: false,
+            error:
+              "No active channel — set one from the top-right channel picker before banning a format.",
+          };
+        }
+        const isBan = name === "ban_format";
+        const confirm = input.confirm === true;
+        const formatIdRaw = input.format_id;
+        const templateMatchRaw = input.template_match;
+        const reason =
+          typeof input.reason === "string" && input.reason.trim().length > 0
+            ? input.reason.trim().slice(0, 500)
+            : null;
+
+        // Resolve which format the user means. format_id wins; otherwise
+        // we fuzzy-match by substring and either proceed (unique hit) or
+        // ask the agent to disambiguate (>1 hit) or 404 (no hits).
+        let resolvedId: number | null = null;
+        if (typeof formatIdRaw === "number" && Number.isFinite(formatIdRaw)) {
+          resolvedId = Math.floor(formatIdRaw);
+        } else if (
+          typeof templateMatchRaw === "string" &&
+          templateMatchRaw.trim().length > 0
+        ) {
+          const matches = findOutlierFormatsByTemplateMatch(
+            activeId,
+            templateMatchRaw.trim(),
+            5
+          );
+          // Filter to the right banned state for the operation: ban looks
+          // at active rows, unban looks at banned rows. If the user
+          // describes a format that's already in the target state, we
+          // still surface it (with action='already_*') so the agent can
+          // tell them it's a no-op.
+          const candidates = matches.filter((f) =>
+            isBan ? f.bannedAt === null : f.bannedAt !== null
+          );
+          if (candidates.length === 0 && matches.length > 0) {
+            // The user described a format that's in the wrong state for
+            // this op (e.g. asked to ban one that's already banned).
+            // Surface those rows so the agent can explain.
+            return {
+              ok: true,
+              data: {
+                pending: true,
+                requires_disambiguation: false,
+                action: isBan ? "already_banned" : "already_active",
+                candidates: matches.map((f) => ({
+                  format_id: f.id,
+                  template: f.template,
+                  avg_multiplier: f.avgMultiplier,
+                  banned: f.bannedAt !== null,
+                })),
+                agentInstruction: isBan
+                  ? "These formats are ALREADY BANNED for this channel. Tell the user — no further action needed. If they want a different format banned, ask for a more specific template_match or a format_id."
+                  : "These formats are ALREADY ACTIVE (not banned) for this channel. Tell the user — no further action needed. If they want a different format unbanned, ask for a more specific template_match.",
+              },
+            };
+          }
+          if (candidates.length === 0) {
+            return {
+              ok: false,
+              error: `No format matches "${templateMatchRaw.trim()}". Try a different substring or pass format_id from list_format_patterns.`,
+            };
+          }
+          if (candidates.length > 1) {
+            return {
+              ok: true,
+              data: {
+                pending: true,
+                requires_disambiguation: true,
+                action: isBan ? "ban" : "unban",
+                candidates: candidates.map((f) => ({
+                  format_id: f.id,
+                  template: f.template,
+                  avg_multiplier: f.avgMultiplier,
+                  banned: f.bannedAt !== null,
+                })),
+                agentInstruction: `Multiple formats matched "${templateMatchRaw.trim()}". Show the user the candidates by template (and avg_multiplier so they can tell similar shapes apart) and ask them to pick one by format_id. Then retry ${name} with confirm:false and that exact format_id.`,
+              },
+            };
+          }
+          resolvedId = candidates[0].id;
+        }
+        if (resolvedId === null) {
+          return {
+            ok: false,
+            error: `${name}: pass either format_id (preferred) or template_match (substring of the template).`,
+          };
+        }
+
+        const fmt = getOutlierFormatById(resolvedId);
+        if (!fmt) {
+          return { ok: false, error: `format ${resolvedId} not found` };
+        }
+        if (fmt.userChannelId !== activeId) {
+          return {
+            ok: false,
+            error: `format ${resolvedId} does not belong to the active channel.`,
+          };
+        }
+        const alreadyTargetState = isBan
+          ? fmt.bannedAt !== null
+          : fmt.bannedAt === null;
+
+        if (!confirm) {
+          const { log: logger } = await import("./logger");
+          logger.debug("chat", `${name} diff requested`, {
+            activeChannelId: activeId,
+            formatId: resolvedId,
+            alreadyTargetState,
+          });
+          return {
+            ok: true,
+            data: {
+              pending: true,
+              action: isBan
+                ? alreadyTargetState
+                  ? "already_banned"
+                  : "ban"
+                : alreadyTargetState
+                  ? "already_active"
+                  : "unban",
+              format_id: resolvedId,
+              template: fmt.template,
+              avg_multiplier: fmt.avgMultiplier,
+              banned: fmt.bannedAt !== null,
+              banned_at: fmt.bannedAt,
+              reason,
+              agentInstruction: alreadyTargetState
+                ? isBan
+                  ? "This format is already banned — tell the user it's a no-op, no second call needed."
+                  : "This format is already active (not banned) — tell the user it's a no-op."
+                : isBan
+                  ? `Show the user the format you're about to BAN (template + avg multiplier). Ask 'yes' to apply, 'no' to cancel. After explicit approval, call ban_format AGAIN with the SAME format_id plus confirm:true. Do NOT call with confirm:true until the user has approved.`
+                  : `Show the user the format you're about to UNBAN (template + when it was banned). Ask 'yes' to apply, 'no' to cancel. After explicit approval, call unban_format AGAIN with the SAME format_id plus confirm:true.`,
+            },
+          };
+        }
+
+        // Confirm path.
+        const { log: logger } = await import("./logger");
+        if (alreadyTargetState) {
+          return {
+            ok: true,
+            data: {
+              applied: false,
+              action: isBan ? "already_banned" : "already_active",
+              format_id: resolvedId,
+              template: fmt.template,
+              message: isBan
+                ? "No change — this format was already banned."
+                : "No change — this format was already active.",
+            },
+          };
+        }
+        const flipped = isBan
+          ? banOutlierFormat(resolvedId)
+          : unbanOutlierFormat(resolvedId);
+        logger.info("chat", `${name} applied`, {
+          activeChannelId: activeId,
+          formatId: resolvedId,
+          flipped,
+          reason,
+        });
+        return {
+          ok: true,
+          data: {
+            applied: flipped,
+            action: isBan ? "ban" : "unban",
+            format_id: resolvedId,
+            template: fmt.template,
+            message: isBan
+              ? "Confirm to the user that the format is banned. It will no longer appear in Patterns, list_format_patterns, or ideation."
+              : "Confirm to the user that the format is restored. It will now surface in Patterns, list_format_patterns, and ideation again.",
+          },
+        };
+      }
       default:
         return { ok: false, error: `unknown tool: ${name}` };
     }
@@ -1581,6 +1819,22 @@ export function buildSystemPrompt(
       `- External sources the creator follows: ${fmt(channel.external_sources)}`,
       `- When the user describes the channel's niche / audience / voice in natural conversation, call \`update_channel_context\` to propose a diff — do NOT silently note it for later. Capture it durably.`
     );
+
+    // T9 — per-channel HAmo-authored ideation rules. Surfaced as its own
+    // H2 because these are HARD enforcement (override every heuristic).
+    // generate_ideas injects the same string into its compose prompt;
+    // the agent ALSO sees it here so it doesn't propose hand-typed titles
+    // that violate the rules in conversation flows that bypass the tool.
+    const ideationRulesValue = (channel.ideation_rules ?? "").trim();
+    if (ideationRulesValue.length > 0) {
+      lines.push(
+        "",
+        `## Per-channel ideation rules (HAmo-authored, HARD enforcement)`,
+        `The creator has set these rules for THIS channel. They override every other compose heuristic — propose-time or composition-time. A title that violates any rule below MUST be regenerated or dropped, never softened.`,
+        ideationRulesValue,
+        ""
+      );
+    }
 
     // Persistent per-channel memory. Top 20 by confidence DESC, recency
     // DESC. These are durable facts the agent should carry across chats
@@ -1724,6 +1978,7 @@ export function buildSystemPrompt(
         `- update_channel_context — propose/apply edits to the active channel's niche/positioning/audience/voice/external_sources. MUST follow the two-step confirm: first call returns a diff, second call (after user says yes) writes.`,
         `- save_channel_memory — store a durable fact about the active channel (key, value). Two-step confirm — mirrors update_channel_context. Use when the user says something like "remember that we never do sponsor reads" or "our videos always end with a call to subscribe".`,
         `- forget_channel_memory — delete a stored fact by key. Two-step confirm. Use when the user explicitly says to forget something. NEVER mass-clear — one key at a time, each with its own confirm.`,
+        `- ban_format / unban_format — soft-ban or restore a trending title format for THIS channel. Two-step confirm — first call returns the resolved format + asks for approval, second call (after explicit user 'yes') applies. Accepts format_id (preferred — from list_format_patterns) OR template_match (substring fuzzy match). On >1 match the tool returns candidates + requires_disambiguation:true; show the list to the user and ask them to pick by format_id, then retry. Banned formats stop appearing in Patterns, list_format_patterns, and the idea-generator pool.`,
         ``,
         `### Audience (your own videos)`,
         `- get_comment_analysis — sentiment, themes, objections, future-video ideas, standout quote candidates per video`
@@ -1740,7 +1995,7 @@ export function buildSystemPrompt(
     `4. For ideation questions: list_outliers → optionally list_format_patterns → generate_ideas. Don't skip to generate_ideas without the source.`,
     `5. For "why did X work" questions: list_outliers (or accept the videoId from context) → explain_outlier.`,
     `6. Avoid retrying the same tool+input combination — the dispatcher rejects duplicates.`,
-    `7. To update channel context (niche/positioning/audience/voice/external_sources), always propose a diff first via update_channel_context with confirm:false. Show the diff to the user, get an explicit yes, THEN call again with confirm:true and the same payload. Never blanket-clear fields without per-field confirmation — when the user says something like "delete my channel context", ask which field(s) and confirm one at a time.`,
+    `7. Two-step confirm is MANDATORY for every mutating channel tool: update_channel_context (niche/positioning/audience/voice/external_sources/ideation_rules), save_channel_memory, forget_channel_memory, ban_format, unban_format. First call ALWAYS with confirm:false (or omitted) — the tool returns a proposal/diff. Show it to the user, get an explicit yes, THEN call AGAIN with confirm:true and the SAME payload. Never blanket-mutate without per-target approval — when the user says "delete my channel context" or "ban everything weak", ask which field/format and confirm one at a time. For ban_format/unban_format with template_match: if requires_disambiguation:true, surface the candidate list and ask the user to pick by format_id BEFORE proceeding to confirm.`,
     `8. When you report ANY video's performance — competitor outlier OR own-channel video — translate raw multipliers to human bands BEFORE writing the line:`,
     `     ≥ 5×        → "hit hard" (or "blew up" for the very biggest)`,
     `     2× to < 5×  → "above average"`,
@@ -1763,8 +2018,8 @@ export function buildSystemPrompt(
   // and before the optional advisor section so it reads as enforcement-tier,
   // not optional flavor. The agent has access to all the data referenced
   // below — generate_ideas returns thumbnailUrl/competitorTitle on every
-  // source outlier, plus otherFormatExamples; list_format_patterns now
-  // returns examples with thumbnails too.
+  // source outlier, plus topicSimilarOutliers (cross-channel topic siblings);
+  // list_format_patterns returns examples with thumbnails too.
   //
   // Terse-by-default: data + visuals + verdict, nothing more. No "Why this
   // format works", no "Channel angle", no levers row. If the user wants
@@ -1793,9 +2048,9 @@ export function buildSystemPrompt(
     ``,
     `[![]({sourceOutlier.thumbnailUrl})](https://www.youtube.com/watch?v={sourceOutlier.videoId}) **Inspired by:** [{sourceOutlier.competitorTitle} — {sourceOutlier.title}](https://www.youtube.com/watch?v={sourceOutlier.videoId}) · {performanceBand} ({multiplier}×)`,
     ``,
-    `**Same format proven:**`,
-    `- [![]({example.thumbnailUrl})](https://www.youtube.com/watch?v={example.videoId}) [{example.title}](https://www.youtube.com/watch?v={example.videoId}) · {example.multiplier}×`,
-    `- [![]({example.thumbnailUrl})](https://www.youtube.com/watch?v={example.videoId}) [{example.title}](https://www.youtube.com/watch?v={example.videoId}) · {example.multiplier}×`,
+    `**Same topic across competitors:**`,
+    `- [![]({similar.thumbnailUrl})](https://www.youtube.com/watch?v={similar.videoId}) [{similar.competitorTitle} — {similar.title}](https://www.youtube.com/watch?v={similar.videoId}) · {similar.performanceBand} ({similar.multiplier}×)`,
+    `- [![]({similar.thumbnailUrl})](https://www.youtube.com/watch?v={similar.videoId}) [{similar.competitorTitle} — {similar.title}](https://www.youtube.com/watch?v={similar.videoId}) · {similar.performanceBand} ({similar.multiplier}×)`,
     ``,
     "**Format:** `{template}` · rising {risingRate}",
     ``,
@@ -1805,14 +2060,15 @@ export function buildSystemPrompt(
     ``,
     `Hard rules:`,
     `- Use \`[![](thumbnail)](url)\` for every video reference — image-as-link, no alt text needed.`,
-    `- performanceBand ("hit hard" / "above average" / "average" / "underperformed") comes VERBATIM from sourceTopicOutliers[0].performanceBand. Do not re-classify the multiplier.`,
+    `- performanceBand ("hit hard" / "above average" / "average" / "underperformed") comes VERBATIM from sourceTopicOutliers[0].performanceBand AND from each topicSimilarOutliers[*].performanceBand. Do not re-classify the multiplier.`,
     `- catalogEmoji + catalogVerdictShort (max 8 words) replace the long verdictCopy. Map validation.verdict → emoji + short:`,
     `    "fresh"                  → ✅ Fresh territory`,
     `    "covered_old"            → ⚠️ Touched 60-90d ago, none since`,
     `    "covered_recently"       → 🛑 Covered recently, would compete`,
     `    "covered_underperformed" → 🟠 Recent flop — fresh angle needed`,
     `- If a thumbnailUrl is missing, drop the image markdown for that one row but keep the text link.`,
-    `- Source outlier (sourceTopicOutliers[0]) and the 2 otherFormatExamples come pre-loaded on every generate_ideas return — do NOT fabricate or re-fetch.`,
+    `- Source outlier (sourceTopicOutliers[0]) and the topicSimilarOutliers list come pre-loaded on every generate_ideas return — do NOT fabricate or re-fetch.`,
+    `- The "Same topic across competitors" block uses topicSimilarOutliers (up to 3 entries). If the array is empty for an idea, OMIT the entire block (header + bullets) — do not print "Same topic across competitors: (none)".`,
     `- After ALL ideas, end with: **Next step this week:** {one sentence — pick ONE idea and why}. One sentence. No follow-up paragraph.`,
     `- Elaborate ONLY when the user explicitly asks ("why this format" / "explain idea N" / "tell me more"). Default = terse.`,
     `- Never strip the structure to save tokens. If you can only fit 3 fully structured ideas, return 3; do NOT degrade to a table.`

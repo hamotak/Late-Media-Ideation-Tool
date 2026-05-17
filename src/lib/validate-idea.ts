@@ -420,3 +420,157 @@ function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max - 1).trimEnd() + "…";
 }
+
+/**
+ * Find competitor outliers whose titles overlap a proposed topic. Powers
+ * the "Same topic across competitors" block in the agent's structured
+ * ideation output (replaces the prior "Same format proven" block, which
+ * showed format siblings — useful for proving the SHAPE but irrelevant
+ * when the user wants to see who else covered the SAME TOPIC and how
+ * hard it hit).
+ *
+ * Scope: competitor_videos owned by the active channel's competitors,
+ * within the same 60d window the outliers SQL uses, with ≥2 keyword hits.
+ * Ranked by (overlap DESC, multiplier DESC). Single-keyword overlap is
+ * too noisy. Returns up to `limit` results.
+ *
+ * Tokenisation matches checkTopicFrequency + validateIdeaAgainstOwnCatalog
+ * (4+ char tokens, stopwords stripped) so the three helpers see topics
+ * the same way.
+ */
+export type TopicSimilarMatch = {
+  videoId: string;
+  title: string;
+  thumbnailUrl: string | null;
+  multiplier: number;
+  performanceBand: PerformanceBand;
+  competitorTitle: string | null;
+  competitorHandle: string | null;
+  matchedKeywords: string[];
+};
+
+export function findTopicSimilarOutliers(
+  topic: string,
+  activeChannelId: string,
+  opts: { limit?: number; excludeVideoIds?: string[] } = {}
+): TopicSimilarMatch[] {
+  const trimmed = topic.trim();
+  if (!trimmed || !activeChannelId) return [];
+  const keywords = tokenize(trimmed);
+  if (keywords.length === 0) return [];
+
+  const limit = Math.max(1, Math.min(20, opts.limit ?? 3));
+  const exclude = new Set(opts.excludeVideoIds ?? []);
+
+  // Pull recent competitor videos for the active channel's competitors,
+  // alongside their channel median so we can compute multiplier without
+  // a second pass. Mirrors the scoped_videos CTE in outliersForUserChannel
+  // (60d window, excludes self-tracked-as-competitor rows, respects
+  // competitor_video_excludes) but skips the median-rank/qualification
+  // step — we want ALL recent competitor videos that match the topic,
+  // ranked by overlap + multiplier, not just methodology outliers.
+  const rows = db
+    .prepare(
+      `WITH scoped AS (
+         SELECT
+           cv.video_id,
+           cv.title,
+           cv.thumbnail_url,
+           COALESCE(cv.views, 0) AS views,
+           cv.competitor_id,
+           c.title  AS competitor_title,
+           c.handle AS competitor_handle,
+           c.user_channel_id,
+           ROW_NUMBER() OVER (PARTITION BY cv.competitor_id ORDER BY cv.views) AS rn,
+           COUNT(*)     OVER (PARTITION BY cv.competitor_id)                  AS n_in_window
+         FROM competitor_videos cv
+         JOIN competitors c ON c.id = cv.competitor_id
+         LEFT JOIN competitor_video_excludes e
+           ON e.user_channel_id = c.user_channel_id
+          AND e.video_id        = cv.video_id
+         WHERE cv.published_at IS NOT NULL
+           AND cv.published_at >= strftime('%s','now') - 60 * 86400
+           AND c.user_channel_id = ?
+           AND e.video_id IS NULL
+           AND (c.channel_id IS NULL OR c.channel_id != c.user_channel_id)
+       ),
+       medians AS (
+         SELECT competitor_id, AVG(views) AS median_views
+         FROM scoped
+         WHERE n_in_window >= 5
+           AND rn IN ((n_in_window + 1) / 2, (n_in_window + 2) / 2)
+         GROUP BY competitor_id
+       )
+       SELECT
+         s.video_id,
+         s.title,
+         s.thumbnail_url,
+         s.views,
+         s.competitor_title,
+         s.competitor_handle,
+         COALESCE(m.median_views, 0) AS median_views
+       FROM scoped s
+       LEFT JOIN medians m ON m.competitor_id = s.competitor_id`
+    )
+    .all(activeChannelId) as Array<{
+    video_id: string;
+    title: string;
+    thumbnail_url: string | null;
+    views: number;
+    competitor_title: string | null;
+    competitor_handle: string | null;
+    median_views: number;
+  }>;
+
+  type Scored = {
+    videoId: string;
+    title: string;
+    thumbnailUrl: string | null;
+    competitorTitle: string | null;
+    competitorHandle: string | null;
+    matchedKeywords: string[];
+    overlap: number;
+    multiplier: number;
+  };
+  const scored: Scored[] = [];
+  for (const r of rows) {
+    if (exclude.has(r.video_id)) continue;
+    const titleLower = r.title.toLowerCase();
+    const hits: string[] = [];
+    for (const kw of keywords) {
+      if (titleLower.includes(kw)) hits.push(kw);
+    }
+    if (hits.length < 2) continue;
+    const multiplier =
+      r.median_views > 0
+        ? Math.round((r.views / r.median_views) * 10) / 10
+        : 0;
+    scored.push({
+      videoId: r.video_id,
+      title: r.title,
+      thumbnailUrl: r.thumbnail_url,
+      competitorTitle: r.competitor_title,
+      competitorHandle: r.competitor_handle,
+      matchedKeywords: hits,
+      overlap: hits.length,
+      multiplier,
+    });
+  }
+
+  scored.sort((a, b) => {
+    if (b.overlap !== a.overlap) return b.overlap - a.overlap;
+    return b.multiplier - a.multiplier;
+  });
+
+  return scored.slice(0, limit).map((s) => ({
+    videoId: s.videoId,
+    title: s.title,
+    thumbnailUrl:
+      s.thumbnailUrl ?? `https://i.ytimg.com/vi/${s.videoId}/mqdefault.jpg`,
+    multiplier: s.multiplier,
+    performanceBand: performanceBandFor(s.multiplier),
+    competitorTitle: s.competitorTitle,
+    competitorHandle: s.competitorHandle,
+    matchedKeywords: s.matchedKeywords,
+  }));
+}

@@ -75,50 +75,76 @@ export async function extractFormatsFromOutliers(
   const md = loadMentorMethod();
   const sec4 = extractSection(md, 4);
   const systemPrompt = [
-    "You are extracting structural title-format templates from a batch of competitor outlier titles. Per MENTOR_METHOD.md §4, title formats are STRUCTURES (templates with placeholders), not literal titles. Multiple titles share the same format when they have the same structural skeleton, even if the specific topic, number, or subject differs.",
+    "You extract REPEATABLE STRUCTURAL TITLE FORMATS from competitor outliers across MULTIPLE channels. A format is a content-agnostic template (placeholders, not concrete topics) that several distinct creators have used to break out of their normal performance. We're looking for STRUCTURAL repetition across creators — not topic repetition, not single-channel signature styles.",
     "",
     "From MENTOR_METHOD.md §4 (Title formats — structural patterns, not literal titles):",
     sec4 || "(section unavailable)",
     "",
+    "# What counts as a TRENDING FORMAT (ALL must hold)",
+    "A format qualifies ONLY if EVERY one of these is true after you assemble it:",
+    "  i.   It has at least 3 example titles drawn from the outlier batch below.",
+    "  ii.  Those examples come from at least 2 DIFFERENT competitor channels (no single-channel signatures). Each batch line tags the competitor — verify across the `ch=` field.",
+    "  iii. Every example is ≥3× its own channel's median (use the multiplier shown in each batch line; lines below 3× are noise for this purpose).",
+    "  iv.  The template has at least 2 placeholder slot variables in square brackets. A no-slot template is a copied title, not a format.",
+    "  v.   The average multiplier across the 3+ examples is ≥5×. Anything lower is noise.",
+    "  vi.  Across any pair of examples, ≤50% of the content words overlap. If two examples share most content words, they are the same TOPIC, not the same FORMAT.",
+    "  vii. Aim for AT MOST 8 formats total. Quality over quantity — if only 4 qualify, return 4. Do NOT pad with weak candidates.",
+    "",
+    "The server re-checks every criterion above and drops any format that fails. Drops surface in the extraction log so HAmo can see which criterion fired. Don't try to game them: thin signal beats fabricated patterns.",
+    "",
     "# Placeholder vocabulary (use SQUARE BRACKETS for every variable)",
-    "Use simple, descriptive placeholder names. Prefer this vocabulary when applicable:",
+    "Simple, descriptive placeholder names. Prefer this vocabulary when applicable:",
     "[Place], [Person], [Topic], [Thing], [Adjective], [Number], [Duration], [Action], [Verb-ed], [Age], [Era], [Authority figure], [Consequence], [Quantity], [Subject].",
-    "If a placeholder doesn't fit any of those, invent a new one — keep it ≤2 words, capitalised.",
+    "If a placeholder doesn't fit any of those, invent a new one — ≤2 words, capitalised.",
     "",
-    "# Rules",
-    "1. Aim for 8–20 distinct formats from the batch. Quality over quantity — if only 6 are real, return 6.",
-    "2. Each title maps to EXACTLY ONE format (best fit). Don't double-assign.",
-    "3. A format must cover at least 2 titles. Singletons are noise — drop them.",
-    "4. Templates should be reusable — they describe the *shape* of a successful title, not its content. \"I went to [Place]'s most [Adjective] [Thing]\" is a format; \"I went to Japan's most haunted shrine\" is not.",
-    "5. Preserve the original casing convention of typical YouTube titles in the template (title case usually).",
-    "",
+    "# Output",
     "Return ONLY a JSON object. No prose, no markdown, no code fence.",
-    "Shape:",
     "{",
     '  "formats": [',
     "    {",
     '      "template": string,        // e.g. "I went to [Place]\'s most [Adjective] [Thing]"',
-    '      "videoIds": string[]       // 2+ video IDs from the batch that fit this template',
+    '      "videoIds": string[]       // 3+ ids from THIS BATCH, drawn from ≥2 different competitors',
     "    }",
     "  ]",
     "}",
   ].join("\n");
 
+  // Each line ships videoId, multiplier (so the model can satisfy the ≥3×
+  // per-example criterion), and the competitor's title (so it can satisfy
+  // the ≥2 distinct channels criterion without guessing). Server-side
+  // validation re-checks both, but giving the model the data costs nothing.
   const userBody = [
-    "# Outlier batch",
-    ...outliers.map((o) => `- [${o.videoId}] ${o.title}`),
+    "# Outlier batch (each line: id, multiplier, competitor, title)",
+    ...outliers.map(
+      (o) =>
+        `- [${o.videoId}] ${o.multiplier.toFixed(1)}× ch="${o.competitorTitle ?? o.competitorHandle ?? "?"}" — ${o.title}`
+    ),
   ].join("\n");
 
   const model = providerModelId("claude");
+  // Extended-thinking budget for format extraction. Format clustering
+  // benefits from reasoning (cross-channel grouping, slot identification,
+  // content-noun-overlap heuristics). Override via env if needed.
+  const FORMATS_THINKING_BUDGET = (() => {
+    const raw = Number(process.env.ANTHROPIC_THINKING_BUDGET_FORMATS);
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 6000;
+  })();
   let raw: string;
   try {
     const client = new Anthropic({ apiKey });
     const resp = await client.messages.create({
       model,
-      max_tokens: 3000,
-      temperature: 0.2,
+      // 10k = ~6k thinking + ~4k for the JSON output. Thinking requires
+      // temperature=1 (the default); we previously ran at 0.2 for tighter
+      // outputs but trade that off for the reasoning quality thinking
+      // delivers on cross-channel clustering + slot identification.
+      max_tokens: 10000,
       system: systemPrompt,
       messages: [{ role: "user", content: userBody }],
+      thinking: {
+        type: "enabled",
+        budget_tokens: FORMATS_THINKING_BUDGET,
+      },
     });
     raw = resp.content
       .filter((b) => b.type === "text")
@@ -148,23 +174,31 @@ export async function extractFormatsFromOutliers(
   const knownIds = new Set(outliers.map((o) => o.videoId));
   const titleByVideo = new Map(outliers.map((o) => [o.videoId, o.title]));
   const multByVideo = new Map(outliers.map((o) => [o.videoId, o.multiplier]));
+  const competitorByVideo = new Map(
+    outliers.map((o) => [o.videoId, o.competitorId])
+  );
   const viewsByVideo = new Map(outliers.map((o) => [o.videoId, o.views]));
   const publishedByVideo = new Map(
     outliers.map((o) => [o.videoId, o.publishedAt ?? 0])
   );
 
-  // DEF-F1/F2/F3/F4: combined post-LLM validation pass.
-  //   F3 — drop templates with <2 slot variables (no [X] markers).
-  //   F2/F4 — per (template, example) grammar-fit: literal anchors must
-  //          appear as whole words in the example; ≥60% of structural
-  //          markers must appear in order. Misfit examples drop.
-  //   F1 — cross-format dedup: each videoId can belong to at most one
-  //          template (the one with highest fit score). Ties broken by
-  //          earliest LLM-output index.
-  // Final pruning: any template with <3 surviving examples is dropped
-  // (raised from 2 — matches the trending-formats UI/chat-tool's
-  // "proven" threshold).
-  const parsed = validateAndDedupFormats(rawParsed, titleByVideo, knownIds);
+  // Post-LLM validation cascade. F1-F4 (slot count, anchor fit, marker
+  // order, cross-format dedup) carry over from prior PRs. T1/T3 add the
+  // trending-format rigour layer on top:
+  //   T1-iii — per-example multiplier ≥3× (drops examples below 3×; if
+  //            <3 survive, drop the format)
+  //   T1-v   — avg multiplier ≥5× across surviving examples
+  //   T1-vi  — pairwise content-word overlap ≤50%
+  //   T3     — cross-channel: surviving examples must span ≥2 competitor ids
+  //   T1-vii — cap at 8 formats total, sorted by avg multiplier DESC
+  // Per-criterion drop counts logged so HAmo can see which gate fired.
+  const parsed = validateAndDedupFormats(
+    rawParsed,
+    titleByVideo,
+    knownIds,
+    multByVideo,
+    competitorByVideo
+  );
   if (parsed.length === 0) {
     log.warn(
       "claude",
@@ -292,7 +326,7 @@ export function getFormatsForChannel(
 }
 
 /**
- * Post-LLM validation + dedup for extracted formats. Four jobs:
+ * Post-LLM validation + dedup for extracted formats. Jobs (in order):
  *
  *   DEF-F3 — drop any template with fewer than 2 [X] slot markers. The
  *            "James Webb Just Found What Scientists Were Afraid Of" kind
@@ -310,18 +344,74 @@ export function getFormatsForChannel(
  *
  *   DEF-F1 — cross-format dedup. After per-example fit pruning, each
  *            videoId belongs to AT MOST ONE template — the one with the
- *            highest fit score. Ties broken by LLM-output order (first
- *            wins, since the model usually returns its strongest match
- *            first when it duplicates).
+ *            highest fit score. Ties broken by LLM-output order.
  *
- * After all four passes, any template with fewer than 3 surviving
- * examples is dropped entirely (the "proven" threshold the trending-
- * formats UI + chat tool surface).
+ *   T1-iii — per-example multiplier ≥3×. Examples below 3× drop. The
+ *            multiplier already encodes "views / channel median" per
+ *            the SQL in outliersForUserChannel.
+ *
+ *   T1-ii  — ≥3 surviving examples after T1-iii ("proven" threshold).
+ *
+ *   T1-v   — avg multiplier ≥5× across surviving examples.
+ *
+ *   T3     — cross-channel: surviving examples must span ≥2 distinct
+ *            competitor_ids. Single-channel signature styles drop.
+ *
+ *   T1-vi  — pairwise content-word overlap ≤50%. For every pair of
+ *            surviving examples, the Jaccard similarity over their
+ *            content tokens (≥4 chars, stopwords stripped) must be ≤0.5.
+ *            If ANY pair exceeds, the format is topic-bound, not
+ *            format-bound, and drops.
+ *
+ *   T1-vii — final cap at 8 formats, sorted by avg multiplier DESC.
+ *
+ * Per-criterion drop counts logged so HAmo can see which gate fired.
  */
+const MAX_TRENDING_FORMATS = 8;
+const PER_EXAMPLE_MIN_MULTIPLIER = 3;
+const AVG_MULTIPLIER_MIN = 5;
+const MIN_DISTINCT_COMPETITORS = 2;
+const MAX_CONTENT_OVERLAP = 0.5;
+
+const VALIDATE_STOPWORDS = new Set([
+  "the","a","an","and","or","but","if","of","in","on","for","to","with",
+  "is","are","was","were","be","been","this","that","these","those","i",
+  "you","he","she","it","we","they","my","your","his","her","its","our",
+  "their","do","does","did","done","have","has","had","not","no","yes",
+  "at","by","from","as","than","then","so","very","what","when","where",
+  "why","how","who","which","there","here","just","like","get","got",
+  "make","made","will","would","can","could","should","shall","may",
+  "might","one","two","three","new","video","videos","about","into",
+  "over","out","off","up","down",
+]);
+
+function contentTokens(title: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of title
+    .toLowerCase()
+    .replace(/[^a-zа-яёіїєґ0-9 ]+/giu, " ")
+    .split(/\s+/)) {
+    if (!raw || raw.length < 4) continue;
+    if (VALIDATE_STOPWORDS.has(raw)) continue;
+    out.add(raw);
+  }
+  return out;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 0;
+  let intersection = 0;
+  for (const t of a) if (b.has(t)) intersection++;
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
 function validateAndDedupFormats(
   parsed: Array<{ template: string; videoIds: string[] }>,
   titleByVideo: Map<string, string>,
-  knownIds: Set<string>
+  knownIds: Set<string>,
+  multByVideo: Map<string, number>,
+  competitorByVideo: Map<string, number>
 ): Array<{ template: string; videoIds: string[] }> {
   const slotCount = (template: string): number =>
     (template.match(/\[[^\]]+\]/g) || []).length;
@@ -461,13 +551,75 @@ function validateAndDedupFormats(
     );
   }
 
-  // --- Final size gate: ≥3 examples per template after all the above.
-  const final = fitsByFormat.filter((f) => f.examples.length >= 3);
-  const droppedSizeAfter = fitsByFormat.length - final.length;
+  // --- T1-iii: drop per-example multipliers <3×. The model can be lazy
+  //     and assign a 2.4× example to a format claiming ≥3× rigor; we
+  //     trim those examples here.
+  let droppedByPerExampleMult = 0;
+  for (const f of fitsByFormat) {
+    const before = f.examples.length;
+    f.examples = f.examples.filter((e) => {
+      const m = multByVideo.get(e.videoId) ?? 0;
+      return m >= PER_EXAMPLE_MIN_MULTIPLIER;
+    });
+    droppedByPerExampleMult += before - f.examples.length;
+  }
+
+  // --- T1-ii: ≥3 surviving examples per template.
+  const afterMinSize = fitsByFormat.filter((f) => f.examples.length >= 3);
+  const droppedTooFew = fitsByFormat.length - afterMinSize.length;
+
+  // --- T1-v: avg multiplier ≥5× across surviving examples.
+  const withAvg = afterMinSize.map((f) => {
+    const mults = f.examples.map((e) => multByVideo.get(e.videoId) ?? 0);
+    const avg =
+      mults.length > 0
+        ? mults.reduce((s, m) => s + m, 0) / mults.length
+        : 0;
+    return { ...f, avgMultiplier: avg };
+  });
+  const afterAvg = withAvg.filter((f) => f.avgMultiplier >= AVG_MULTIPLIER_MIN);
+  const droppedByAvg = withAvg.length - afterAvg.length;
+
+  // --- T3: ≥2 distinct competitor_ids across surviving examples.
+  const afterCrossChannel = afterAvg.filter((f) => {
+    const ids = new Set<number>();
+    for (const e of f.examples) {
+      const cid = competitorByVideo.get(e.videoId);
+      if (cid !== undefined) ids.add(cid);
+    }
+    return ids.size >= MIN_DISTINCT_COMPETITORS;
+  });
+  const droppedSingleChannel = afterAvg.length - afterCrossChannel.length;
+
+  // --- T1-vi: pairwise content-word overlap ≤50%. If ANY pair of
+  //     examples in the format exceeds 50% content Jaccard, the format
+  //     is topic-bound (same subject in different titles), not format-
+  //     bound (same structure across different subjects). Drop it.
+  const afterContentOverlap = afterCrossChannel.filter((f) => {
+    const tokenSets = f.examples.map((e) =>
+      contentTokens(titleByVideo.get(e.videoId) ?? "")
+    );
+    for (let i = 0; i < tokenSets.length; i++) {
+      for (let j = i + 1; j < tokenSets.length; j++) {
+        if (jaccard(tokenSets[i], tokenSets[j]) > MAX_CONTENT_OVERLAP) {
+          return false;
+        }
+      }
+    }
+    return true;
+  });
+  const droppedByOverlap = afterCrossChannel.length - afterContentOverlap.length;
+
+  // --- T1-vii: cap at 8 formats, sorted by avg multiplier DESC.
+  const sorted = [...afterContentOverlap].sort(
+    (a, b) => b.avgMultiplier - a.avgMultiplier
+  );
+  const final = sorted.slice(0, MAX_TRENDING_FORMATS);
+  const droppedByCap = sorted.length - final.length;
 
   log.info(
     "claude",
-    `Format-validate: ${parsed.length} → ${slotPassed.length} (after F3) → ${final.length} survived (F1 dedup + ≥3 examples). F3 dropped ${droppedF3}, final size cut ${droppedSizeAfter}.`
+    `Format-validate: raw=${parsed.length} → slot=${slotPassed.length} (F3 drop ${droppedF3}) → minSize=${afterMinSize.length} (per-example<3× drop ${droppedByPerExampleMult}, <3 examples drop ${droppedTooFew}) → avg≥5×=${afterAvg.length} (drop ${droppedByAvg}) → cross-channel=${afterCrossChannel.length} (drop ${droppedSingleChannel}) → overlap≤50%=${afterContentOverlap.length} (drop ${droppedByOverlap}) → cap${MAX_TRENDING_FORMATS}=${final.length} (drop ${droppedByCap}).`
   );
 
   return final.map((f) => ({

@@ -28,7 +28,8 @@ type FieldKey =
   | "positioning"
   | "audience"
   | "voice"
-  | "externalSources";
+  | "externalSources"
+  | "ideationRules";
 
 type ChannelContext = {
   id: string;
@@ -41,6 +42,7 @@ type ChannelContext = {
   audience: string;
   voice: string;
   externalSources: string;
+  ideationRules: string;
 };
 
 type FieldDef = {
@@ -92,6 +94,15 @@ const FIELDS: FieldDef[] = [
       "Off-YouTube sources the AI should reference during ideation. One per line.",
     placeholder:
       "r/Space\nr/AskAstronomy\nNASA mission archives\nScientific American",
+    multiline: true,
+  },
+  {
+    key: "ideationRules",
+    label: "Ideation rules (HARD enforcement)",
+    description:
+      "Non-negotiable rules the ideation agent must follow when composing titles. Injected verbatim into the compose system prompt. One rule per line. Use for constraints you never want bent: voice constraints, banned shapes, format-bias overrides, etc.",
+    placeholder:
+      "Every title must mention a specific person or place.\nNever use abstract words ('reality', 'consciousness').\nMirror Late Science's terse register — no flowery adjectives.",
     multiline: true,
   },
 ];
@@ -565,7 +576,13 @@ function ContextField({
             onChange={(e) => setDraft(e.target.value)}
             disabled={saving}
             placeholder={field.placeholder}
-            rows={field.key === "externalSources" ? 6 : field.multiline ? 4 : 2}
+            rows={
+              field.key === "externalSources" || field.key === "ideationRules"
+                ? 6
+                : field.multiline
+                  ? 4
+                  : 2
+            }
             className={cn(
               "w-full rounded-md border border-input bg-background px-3 py-2 text-sm",
               "focus:outline-none focus:ring-2 focus:ring-ring",

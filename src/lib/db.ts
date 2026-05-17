@@ -621,6 +621,11 @@ export type Channel = {
   audience?: string;
   voice?: string;
   external_sources?: string;
+  // T9 — HAmo-authored hard-enforcement ideation rules. Injected
+  // verbatim into the ideation compose prompt (or "(none set)" when
+  // empty). Edited on /channel-info; chat tool update_channel_context
+  // also accepts this field.
+  ideation_rules?: string;
 };
 
 /**
@@ -664,7 +669,8 @@ export type ChannelContextField =
   | "positioning"
   | "audience"
   | "voice"
-  | "external_sources";
+  | "external_sources"
+  | "ideation_rules";
 
 const CHANNEL_CONTEXT_FIELDS: readonly ChannelContextField[] = [
   "niche",
@@ -672,6 +678,7 @@ const CHANNEL_CONTEXT_FIELDS: readonly ChannelContextField[] = [
   "audience",
   "voice",
   "external_sources",
+  "ideation_rules",
 ] as const;
 
 export function updateChannelContext(
@@ -1718,6 +1725,10 @@ db.exec(`
     { name: "audience", type: "TEXT", default: "''" },
     { name: "voice", type: "TEXT", default: "''" },
     { name: "external_sources", type: "TEXT", default: "''" },
+    // T9 — HAmo-authored hard-enforcement rules injected verbatim into
+    // the ideation compose prompt. Same DEFAULT '' contract as the
+    // other context fields so the prompt builder never sees NULL.
+    { name: "ideation_rules", type: "TEXT", default: "''" },
   ];
   for (const col of newColumns) {
     if (channelCols.includes(col.name)) continue;
@@ -4278,6 +4289,30 @@ db.exec(`
     ON outlier_format_videos(video_id);
 `);
 
+// T6: banned_at column for soft-ban of trending formats. NULL = active,
+// non-NULL = banned at that timestamp. Idempotent ADD COLUMN via PRAGMA
+// guard (matches the chat_messages.thinking / chat_sessions.channel_id
+// patterns above). Index lets the IS NULL filter in listFormatsForChannel
+// hit cheaply. Wipe-on-reextract already deletes rows by user_channel_id,
+// so a ban survives until the next re-extract that drops/recreates the
+// template — that's the right semantic: a banned template should not
+// resurface, but a fresh extract that no longer detects it doesn't need
+// to keep the ban around.
+try {
+  const cols = db
+    .prepare(`PRAGMA table_info(outlier_formats)`)
+    .all() as { name: string }[];
+  if (!cols.some((c) => c.name === "banned_at")) {
+    db.exec(`ALTER TABLE outlier_formats ADD COLUMN banned_at INTEGER`);
+  }
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_outlier_formats_banned
+       ON outlier_formats(user_channel_id, banned_at)`
+  );
+} catch {
+  /* noop */
+}
+
 export type OutlierFormat = {
   id: number;
   userChannelId: string;
@@ -4287,6 +4322,11 @@ export type OutlierFormat = {
   risingRate: number | null;
   extractedAt: number;
   model: string | null;
+  // T6: NULL = active, non-NULL timestamp = banned. listFormatsForChannel
+  // filters banned rows out; idea-generator's format pool inherits that
+  // filter via getFormatsForChannel; the chat tool list_format_patterns
+  // calls getFormatsForChannel directly too.
+  bannedAt: number | null;
 };
 
 /**
@@ -4396,9 +4436,10 @@ export function listFormatsForChannel(
   const rows = db
     .prepare(
       `SELECT id, user_channel_id, template, avg_multiplier,
-              total_views_month, rising_rate, extracted_at, model
+              total_views_month, rising_rate, extracted_at, model, banned_at
        FROM outlier_formats
        WHERE user_channel_id = ?
+         AND banned_at IS NULL
        ORDER BY COALESCE(rising_rate, 0) DESC, COALESCE(avg_multiplier, 0) DESC
        LIMIT ?`
     )
@@ -4411,6 +4452,7 @@ export function listFormatsForChannel(
     rising_rate: number | null;
     extracted_at: number;
     model: string | null;
+    banned_at: number | null;
   }>;
   return rows.map((r) => ({
     id: r.id,
@@ -4421,6 +4463,128 @@ export function listFormatsForChannel(
     risingRate: r.rising_rate,
     extractedAt: r.extracted_at,
     model: r.model,
+    bannedAt: r.banned_at,
+  }));
+}
+
+/**
+ * T6 — soft-ban a single format. Marks banned_at = now(); leaves the row
+ * + its video links intact (a future unban restores everything cleanly).
+ * Returns true if a row was actually flipped from active → banned.
+ */
+export function banOutlierFormat(formatId: number): boolean {
+  const info = db
+    .prepare(
+      `UPDATE outlier_formats
+         SET banned_at = strftime('%s','now')
+       WHERE id = ? AND banned_at IS NULL`
+    )
+    .run(formatId);
+  return info.changes > 0;
+}
+
+/**
+ * T6 — clear the soft-ban. Returns true if the row went banned → active.
+ */
+export function unbanOutlierFormat(formatId: number): boolean {
+  const info = db
+    .prepare(
+      `UPDATE outlier_formats
+         SET banned_at = NULL
+       WHERE id = ? AND banned_at IS NOT NULL`
+    )
+    .run(formatId);
+  return info.changes > 0;
+}
+
+/**
+ * T6 — fetch a single format by id (active OR banned). Used by the ban
+ * endpoint to confirm the row exists + by the chat tool to resolve a
+ * format_id before mutating it.
+ */
+export function getOutlierFormatById(
+  formatId: number
+): OutlierFormat | null {
+  const r = db
+    .prepare(
+      `SELECT id, user_channel_id, template, avg_multiplier,
+              total_views_month, rising_rate, extracted_at, model, banned_at
+       FROM outlier_formats
+       WHERE id = ?`
+    )
+    .get(formatId) as
+    | {
+        id: number;
+        user_channel_id: string;
+        template: string;
+        avg_multiplier: number | null;
+        total_views_month: number | null;
+        rising_rate: number | null;
+        extracted_at: number;
+        model: string | null;
+        banned_at: number | null;
+      }
+    | undefined;
+  if (!r) return null;
+  return {
+    id: r.id,
+    userChannelId: r.user_channel_id,
+    template: r.template,
+    avgMultiplier: r.avg_multiplier,
+    totalViewsMonth: r.total_views_month,
+    risingRate: r.rising_rate,
+    extractedAt: r.extracted_at,
+    model: r.model,
+    bannedAt: r.banned_at,
+  };
+}
+
+/**
+ * T8 — fuzzy template lookup for the chat ban_format / unban_format tools.
+ * Substring (case-insensitive) match over template for the active channel.
+ * Returns up to `limit` rows so the agent can either disambiguate ("which
+ * of these did you mean?") or proceed directly when the match is unique.
+ * Both active and banned rows are returned so unban can target banned
+ * rows — callers filter banned_at IS NULL when they care.
+ */
+export function findOutlierFormatsByTemplateMatch(
+  userChannelId: string,
+  substring: string,
+  limit = 5
+): OutlierFormat[] {
+  const needle = substring.trim();
+  if (!needle) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, user_channel_id, template, avg_multiplier,
+              total_views_month, rising_rate, extracted_at, model, banned_at
+       FROM outlier_formats
+       WHERE user_channel_id = ?
+         AND LOWER(template) LIKE LOWER(?)
+       ORDER BY COALESCE(rising_rate, 0) DESC, COALESCE(avg_multiplier, 0) DESC
+       LIMIT ?`
+    )
+    .all(userChannelId, `%${needle}%`, limit) as Array<{
+    id: number;
+    user_channel_id: string;
+    template: string;
+    avg_multiplier: number | null;
+    total_views_month: number | null;
+    rising_rate: number | null;
+    extracted_at: number;
+    model: string | null;
+    banned_at: number | null;
+  }>;
+  return rows.map((r) => ({
+    id: r.id,
+    userChannelId: r.user_channel_id,
+    template: r.template,
+    avgMultiplier: r.avg_multiplier,
+    totalViewsMonth: r.total_views_month,
+    risingRate: r.rising_rate,
+    extractedAt: r.extracted_at,
+    model: r.model,
+    bannedAt: r.banned_at,
   }));
 }
 
