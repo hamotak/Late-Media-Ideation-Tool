@@ -6,18 +6,62 @@ import {
   getIntegration,
   recordCompetitorAlert,
   updateCompetitorAfterSync,
+  upsertCompetitorComments,
+  upsertCompetitorTranscript,
   upsertCompetitorVideo,
+  type Competitor,
 } from "./db";
+import {
+  fetchCommentThreads,
+  fetchTranscriptFree,
+  fetchVideos,
+  listUploadIds,
+  resolveChannel,
+  YouTubeApiError,
+} from "./youtube";
 import { log } from "./logger";
 
+/* ============================================================
+ * Competitor sync — YouTube Data API primary, Apify fallback.
+ *
+ * History: this used to be Apify-only because Apify scrapers don't need
+ * an API key and don't share quota with anything else. The trade-off
+ * was per-request cost (~$0.05 per channel sync) and slower throughput.
+ *
+ * Eric (and any local-only install) is better served by YouTube Data
+ * API v3: 10k free units/day, faster, more accurate metadata. A typical
+ * 50-video competitor sync costs roughly:
+ *   - channels.list / search       1-10 units (channel resolution)
+ *   - playlistItems.list           1 unit (uploads playlist)
+ *   - videos.list (50/batch)       1 unit
+ *   - commentThreads.list per video ~1 unit each   = ~50 units
+ *   - timedtext (captions)         0 units (free, not in quota)
+ *   ----------------------------------------------------------
+ *   ~62 units per competitor full sync → ~160 syncs/day on the free
+ *   tier. Plenty for any normal use.
+ *
+ * Apify is still here as a fallback for two cases:
+ *   - User hasn't configured a YouTube Data API key yet
+ *   - YT API quota exceeded for the day (403 with /quotaExceeded/)
+ *
+ * Apify gives metadata only; transcripts and comments are skipped on
+ * the Apify path because the actor we use (streamers~youtube-scraper)
+ * doesn't return them.
+ * ============================================================ */
+
 // Outlier threshold — when a video's views exceed median × this we flag it.
-// 2× is a reasonable starting point: it catches genuine breakout content
-// without firing on every slightly-above-average upload.
 const OUTLIER_MULTIPLIER = 2.0;
 
-// How many videos to pull per sync. Apify charges per request, so we cap
-// at 50 — covers most channels' recent activity without burning credits.
+// How many videos to pull per sync. Capped because:
+//   - YouTube playlistItems.list returns 50 max per page
+//   - Apify scraper rate is per request; 50 covers most channels' recent
+//     activity without blowing through credits.
 const VIDEOS_PER_SYNC = 50;
+
+// Per-video cap for comments fetched on the YT-Data-API path. Most
+// competitor analysis only needs the top-relevance handful — 20 is
+// enough to surface theme + sentiment without doubling our quota cost.
+const COMMENTS_PER_VIDEO = 20;
 
 export class CompetitorSyncError extends Error {
   constructor(message: string) {
@@ -26,9 +70,21 @@ export class CompetitorSyncError extends Error {
   }
 }
 
+export type SyncResult = {
+  videosSeen: number;
+  videosInserted: number;
+  newAlerts: number;
+  channelTitle: string | null;
+  medianViews: number;
+  transcriptsSaved: number; // 0 on the Apify fallback path
+  commentsSaved: number;    // 0 on the Apify fallback path
+  source: "youtube-api" | "apify";
+};
+
 /**
  * Resolve various user-supplied identifiers (@handle, full URLs, plain
- * UCxxxxx) to a single canonical channel URL that Apify accepts.
+ * UCxxxxx) to a single canonical channel URL. Used by the Apify path,
+ * which wants a URL string.
  */
 export function normaliseChannelUrl(input: string): string {
   const trimmed = input.trim();
@@ -40,7 +96,6 @@ export function normaliseChannelUrl(input: string): string {
   if (/^UC[A-Za-z0-9_-]{20,}$/.test(trimmed)) {
     return `https://www.youtube.com/channel/${trimmed}`;
   }
-  // Bare handle without @ prefix.
   if (/^[A-Za-z0-9_.-]+$/.test(trimmed)) {
     return `https://www.youtube.com/@${trimmed}`;
   }
@@ -53,13 +108,11 @@ export function normaliseChannelUrl(input: string): string {
 function parseDuration(raw: string | undefined): number | null {
   if (!raw) return null;
   if (/^\d+$/.test(raw)) return Number(raw);
-  // ISO 8601: PT3M42S
   const iso = raw.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
   if (iso) {
     const [, h = "0", m = "0", s = "0"] = iso;
     return Number(h) * 3600 + Number(m) * 60 + Number(s);
   }
-  // Colon-separated 3:42 or 1:03:42
   const parts = raw.split(":").map((p) => Number(p));
   if (parts.every((n) => Number.isFinite(n))) {
     if (parts.length === 2) return parts[0] * 60 + parts[1];
@@ -77,34 +130,239 @@ function parseDate(raw: string | undefined): number | null {
 function extractVideoId(url: string | undefined, fallback: string | undefined): string | null {
   if (fallback) return fallback;
   if (!url) return null;
-  // youtu.be/ID, watch?v=ID, /shorts/ID
   const m = url.match(/(?:youtu\.be\/|v=|\/shorts\/)([A-Za-z0-9_-]{11})/);
   return m ? m[1] : null;
 }
 
-/**
- * Pull the competitor's latest videos via Apify, upsert them, and
- * promote any outliers (views ≥ median × OUTLIER_MULTIPLIER) into
- * alerts. Returns a small summary the UI can show after a sync.
- */
-export async function syncCompetitor(competitorId: number): Promise<{
-  videosSeen: number;
-  videosInserted: number;
-  newAlerts: number;
-  channelTitle: string | null;
-  medianViews: number;
-}> {
+function isQuotaExceeded(err: unknown): boolean {
+  if (!(err instanceof YouTubeApiError)) return false;
+  if (err.status !== 403) return false;
+  return /quota/i.test(err.message);
+}
+
+/* ============================================================
+ * Public entrypoint — picks the best backend and falls back on quota.
+ * ============================================================ */
+
+export async function syncCompetitor(competitorId: number): Promise<SyncResult> {
   const competitor = getCompetitor(competitorId);
   if (!competitor) {
     throw new CompetitorSyncError(`Competitor ${competitorId} not found`);
   }
+
+  const youtubeKey = getIntegration("youtube")?.api_key;
   const apifyKey = getIntegration("apify")?.api_key;
-  if (!apifyKey) {
+
+  // Prefer YouTube Data API: free, faster, richer (transcripts + comments).
+  if (youtubeKey) {
+    try {
+      return await syncViaYouTubeApi(competitor, youtubeKey);
+    } catch (err) {
+      if (isQuotaExceeded(err) && apifyKey) {
+        log.warn(
+          "competitors",
+          "YouTube Data API quota exceeded — falling back to Apify",
+          { competitorId, error: err instanceof Error ? err.message : String(err) }
+        );
+        return await syncViaApify(competitor, apifyKey);
+      }
+      throw err;
+    }
+  }
+
+  if (apifyKey) {
+    log.info(
+      "competitors",
+      "No YouTube Data API key — using Apify for competitor sync",
+      { competitorId }
+    );
+    return await syncViaApify(competitor, apifyKey);
+  }
+
+  throw new CompetitorSyncError(
+    "No competitor-sync backend configured. Add a YouTube Data API key in Integrations (free, recommended) or an Apify token as a fallback."
+  );
+}
+
+/* ============================================================
+ * Backend: YouTube Data API (primary)
+ * ============================================================ */
+
+async function syncViaYouTubeApi(
+  competitor: Competitor,
+  youtubeKey: string
+): Promise<SyncResult> {
+  const input =
+    competitor.channel_id ||
+    competitor.handle ||
+    null;
+  if (!input) {
     throw new CompetitorSyncError(
-      "Apify API key is not configured. Add it in Integrations to sync competitors."
+      `Competitor ${competitor.id} has no channel identifier — re-add with a valid handle/URL.`
     );
   }
 
+  log.info("competitors", "Syncing competitor via YouTube Data API", {
+    competitorId: competitor.id,
+    input,
+  });
+  const startedAt = Date.now();
+
+  // 1. Resolve channel (~1-10 quota units)
+  const ch = await resolveChannel(input, youtubeKey);
+
+  // 2. List uploads (1 unit per 50-video page; cap to VIDEOS_PER_SYNC)
+  const videoIds = await listUploadIds(ch.uploadsPlaylistId, youtubeKey, {
+    max: VIDEOS_PER_SYNC,
+  });
+
+  // 3. Fetch video metadata (1 unit per 50-video batch)
+  const videos = await fetchVideos(videoIds, youtubeKey);
+
+  let videosInserted = 0;
+  for (const v of videos) {
+    upsertCompetitorVideo({
+      competitor_id: competitor.id,
+      video_id: v.id,
+      title: v.title,
+      thumbnail_url: v.thumbnail ?? `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`,
+      views: v.views,
+      likes: v.likes,
+      comments: v.comments,
+      duration_seconds: v.durationSeconds,
+      published_at: v.publishedAt,
+    });
+    videosInserted++;
+  }
+
+  updateCompetitorAfterSync(competitor.id, {
+    title: ch.title,
+    channel_id: ch.id,
+    video_count: videosInserted,
+  });
+
+  // 4. Captions via timedtext (FREE — not part of YT Data API quota).
+  //    Best-effort: silently skip videos that don't expose captions.
+  let transcriptsSaved = 0;
+  for (const v of videos) {
+    try {
+      const t = await fetchTranscriptFree(v.id);
+      if (t && t.text.trim().length > 50) {
+        upsertCompetitorTranscript(competitor.id, v.id, t.text, t.language);
+        transcriptsSaved++;
+      }
+    } catch {
+      // Per-video timedtext probe failure is normal and shouldn't kill
+      // the sync. We just move on.
+    }
+    // Mild pacing so we don't hammer Google with parallel timedtext
+    // requests (the endpoint isn't rate-limited per se but bursts can
+    // get throttled).
+    await new Promise((r) => setTimeout(r, 80));
+  }
+
+  // 5. Top comments per video (1 unit per video — biggest quota chunk).
+  //    If the quota runs out mid-loop we bail out gracefully without
+  //    failing the whole sync.
+  let commentsSaved = 0;
+  let quotaHitOnComments = false;
+  for (const v of videos) {
+    if (quotaHitOnComments) break;
+    try {
+      const threads = await fetchCommentThreads(v.id, youtubeKey, {
+        maxThreads: COMMENTS_PER_VIDEO,
+        order: "relevance",
+      });
+      upsertCompetitorComments(
+        competitor.id,
+        threads
+          // Only top-level for competitors — reply chains rarely add
+          // signal and double the row count.
+          .filter((c) => c.parentId === null)
+          .map((c) => ({
+            id: c.id,
+            video_id: v.id,
+            author: c.author,
+            author_channel_id: c.authorChannelId,
+            text: c.text,
+            like_count: c.likes,
+            reply_count: c.replyCount,
+            published_at: c.publishedAt,
+          }))
+      );
+      commentsSaved += threads.filter((c) => c.parentId === null).length;
+    } catch (err) {
+      if (isQuotaExceeded(err)) {
+        log.warn(
+          "competitors",
+          "YouTube quota exceeded during competitor comments — stopping comments fetch but keeping metadata/transcripts",
+          { competitorId: competitor.id, videosWithComments: commentsSaved }
+        );
+        quotaHitOnComments = true;
+        continue;
+      }
+      // Comments disabled, video private, etc. — log and move on.
+      log.warn("competitors", "Failed to fetch comments for competitor video", {
+        competitorId: competitor.id,
+        videoId: v.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // 6. Outlier scan — runs after inserts so median includes the new rows.
+  const median = competitorMedianViews(competitor.id);
+  let newAlerts = 0;
+  if (median > 0) {
+    for (const v of videos) {
+      if (!v.views) continue;
+      const multiplier = v.views / median;
+      if (multiplier >= OUTLIER_MULTIPLIER) {
+        recordCompetitorAlert({
+          competitor_id: competitor.id,
+          video_id: v.id,
+          title: v.title,
+          thumbnail_url: v.thumbnail ?? `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`,
+          views: v.views,
+          channel_median_views: median,
+          multiplier: Math.round(multiplier * 10) / 10,
+        });
+        newAlerts++;
+      }
+    }
+  }
+
+  log.info("competitors", "Competitor sync done (YouTube Data API)", {
+    competitorId: competitor.id,
+    videosSeen: videos.length,
+    videosInserted,
+    transcriptsSaved,
+    commentsSaved,
+    newAlerts,
+    medianViews: median,
+    durationMs: Date.now() - startedAt,
+  });
+
+  return {
+    videosSeen: videos.length,
+    videosInserted,
+    newAlerts,
+    channelTitle: ch.title,
+    medianViews: median,
+    transcriptsSaved,
+    commentsSaved,
+    source: "youtube-api",
+  };
+}
+
+/* ============================================================
+ * Backend: Apify (fallback)
+ * ============================================================ */
+
+async function syncViaApify(
+  competitor: Competitor,
+  apifyKey: string
+): Promise<SyncResult> {
   const url = competitor.channel_id
     ? `https://www.youtube.com/channel/${competitor.channel_id}`
     : competitor.handle
@@ -112,32 +370,33 @@ export async function syncCompetitor(competitorId: number): Promise<{
       : null;
   if (!url) {
     throw new CompetitorSyncError(
-      `Competitor ${competitorId} has no channel identifier — re-add with a valid handle/URL.`
+      `Competitor ${competitor.id} has no channel identifier — re-add with a valid handle/URL.`
     );
   }
 
-  log.info("competitors", "Syncing competitor", { competitorId, url });
+  log.info("competitors", "Syncing competitor via Apify (fallback)", {
+    competitorId: competitor.id,
+    url,
+  });
   const startedAt = Date.now();
   const items: ApifyYouTubeVideo[] = await apifyYouTubeScrape(
     { startUrls: [{ url }], maxResults: VIDEOS_PER_SYNC, includeTranscript: false },
     apifyKey
   );
 
-  // Pull channel metadata off the first item (Apify embeds channelName
-  // / channelUrl on every video row). We don't fetch channel info
-  // separately because the scraper already has it.
   const first = items[0];
   const channelTitle = first?.channelName ?? competitor.title ?? null;
-  // ChannelUrl pattern: https://www.youtube.com/channel/UCxxx
   const channelIdMatch = first?.channelUrl?.match(/channel\/(UC[A-Za-z0-9_-]+)/);
-  const resolvedChannelId = channelIdMatch ? channelIdMatch[1] : competitor.channel_id;
+  const resolvedChannelId = channelIdMatch
+    ? channelIdMatch[1]
+    : competitor.channel_id ?? null;
 
   let videosInserted = 0;
   for (const it of items) {
     const vid = extractVideoId(it.url, it.id);
     if (!vid || !it.title) continue;
     upsertCompetitorVideo({
-      competitor_id: competitorId,
+      competitor_id: competitor.id,
       video_id: vid,
       title: it.title,
       thumbnail_url: `https://i.ytimg.com/vi/${vid}/mqdefault.jpg`,
@@ -150,14 +409,13 @@ export async function syncCompetitor(competitorId: number): Promise<{
     videosInserted++;
   }
 
-  updateCompetitorAfterSync(competitorId, {
+  updateCompetitorAfterSync(competitor.id, {
     title: channelTitle,
     channel_id: resolvedChannelId,
     video_count: videosInserted,
   });
 
-  // Outlier scan — must run AFTER inserts so median includes the new rows.
-  const median = competitorMedianViews(competitorId);
+  const median = competitorMedianViews(competitor.id);
   let newAlerts = 0;
   if (median > 0) {
     for (const it of items) {
@@ -166,7 +424,7 @@ export async function syncCompetitor(competitorId: number): Promise<{
       const multiplier = it.viewCount / median;
       if (multiplier >= OUTLIER_MULTIPLIER) {
         recordCompetitorAlert({
-          competitor_id: competitorId,
+          competitor_id: competitor.id,
           video_id: vid,
           title: it.title,
           thumbnail_url: `https://i.ytimg.com/vi/${vid}/mqdefault.jpg`,
@@ -179,8 +437,8 @@ export async function syncCompetitor(competitorId: number): Promise<{
     }
   }
 
-  log.info("competitors", "Competitor sync done", {
-    competitorId,
+  log.info("competitors", "Competitor sync done (Apify fallback)", {
+    competitorId: competitor.id,
     videosSeen: items.length,
     videosInserted,
     newAlerts,
@@ -194,5 +452,8 @@ export async function syncCompetitor(competitorId: number): Promise<{
     newAlerts,
     channelTitle,
     medianViews: median,
+    transcriptsSaved: 0,
+    commentsSaved: 0,
+    source: "apify",
   };
 }

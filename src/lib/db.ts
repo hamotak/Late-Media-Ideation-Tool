@@ -2982,6 +2982,43 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_comp_videos_views ON competitor_videos(competitor_id, views DESC);
 
+  -- Captions for competitor videos. Pulled via YouTube's free timedtext
+  -- endpoint when the YT-Data-API competitor sync runs -- no API quota
+  -- cost, but only ~80% of videos have usable captions. Schema mirrors
+  -- the main transcripts table but keyed by competitor_id + video_id
+  -- (no FK to videos because these videos are not in the main videos
+  -- table).
+  CREATE TABLE IF NOT EXISTS competitor_transcripts (
+    competitor_id INTEGER NOT NULL,
+    video_id TEXT NOT NULL,
+    language TEXT,
+    text TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (competitor_id, video_id),
+    FOREIGN KEY (competitor_id) REFERENCES competitors(id) ON DELETE CASCADE
+  );
+
+  -- Top comments for competitor videos. We only pull top-relevance
+  -- threads (no replies) at a fixed cap per video to keep YT Data API
+  -- quota in check. Schema mirrors the main comments table.
+  CREATE TABLE IF NOT EXISTS competitor_comments (
+    id TEXT PRIMARY KEY,
+    competitor_id INTEGER NOT NULL,
+    video_id TEXT NOT NULL,
+    author TEXT,
+    author_channel_id TEXT,
+    text TEXT NOT NULL,
+    like_count INTEGER,
+    reply_count INTEGER,
+    published_at INTEGER,
+    fetched_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (competitor_id) REFERENCES competitors(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_comp_comments_video
+    ON competitor_comments(competitor_id, video_id);
+  CREATE INDEX IF NOT EXISTS idx_comp_comments_likes
+    ON competitor_comments(competitor_id, video_id, like_count DESC);
+
   -- Auto-detected viral hits we surface as Alerts. One row per
   -- (competitor, video) pair; re-detection is idempotent on PK conflict.
   CREATE TABLE IF NOT EXISTS competitor_alerts (
@@ -3145,6 +3182,111 @@ export function listCompetitorVideos(
  * an alert. Median chosen over mean because a single huge hit
  * would otherwise hide all subsequent viral candidates.
  */
+export function upsertCompetitorTranscript(
+  competitorId: number,
+  videoId: string,
+  text: string,
+  language: string | null
+): void {
+  db.prepare(
+    `INSERT INTO competitor_transcripts
+       (competitor_id, video_id, language, text, fetched_at)
+     VALUES (?, ?, ?, ?, strftime('%s','now'))
+     ON CONFLICT(competitor_id, video_id) DO UPDATE SET
+       language = excluded.language,
+       text = excluded.text,
+       fetched_at = excluded.fetched_at`
+  ).run(competitorId, videoId, language, text);
+}
+
+export function upsertCompetitorComments(
+  competitorId: number,
+  rows: Array<{
+    id: string;
+    video_id: string;
+    author: string | null;
+    author_channel_id: string | null;
+    text: string;
+    like_count: number;
+    reply_count: number;
+    published_at: number | null;
+  }>
+): void {
+  if (rows.length === 0) return;
+  const stmt = db.prepare(
+    `INSERT INTO competitor_comments
+       (id, competitor_id, video_id, author, author_channel_id, text,
+        like_count, reply_count, published_at, fetched_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+     ON CONFLICT(id) DO UPDATE SET
+       text = excluded.text,
+       like_count = excluded.like_count,
+       reply_count = excluded.reply_count,
+       fetched_at = excluded.fetched_at`
+  );
+  const tx = db.transaction((batch: typeof rows) => {
+    for (const r of batch) {
+      stmt.run(
+        r.id,
+        competitorId,
+        r.video_id,
+        r.author,
+        r.author_channel_id,
+        r.text,
+        r.like_count,
+        r.reply_count,
+        r.published_at
+      );
+    }
+  });
+  tx(rows);
+}
+
+export function getCompetitorTranscript(
+  competitorId: number,
+  videoId: string
+): { text: string; language: string | null } | null {
+  const row = db
+    .prepare(
+      `SELECT text, language FROM competitor_transcripts
+       WHERE competitor_id = ? AND video_id = ?`
+    )
+    .get(competitorId, videoId) as
+    | { text: string; language: string | null }
+    | undefined;
+  return row ?? null;
+}
+
+export function listCompetitorComments(
+  competitorId: number,
+  videoId: string,
+  limit = 50
+): Array<{
+  id: string;
+  author: string | null;
+  text: string;
+  like_count: number;
+  reply_count: number;
+  published_at: number | null;
+}> {
+  return db
+    .prepare(
+      `SELECT id, author, text, like_count, reply_count, published_at
+       FROM competitor_comments
+       WHERE competitor_id = ? AND video_id = ?
+       ORDER BY like_count DESC, published_at DESC
+       LIMIT ?`
+    )
+    .all(competitorId, videoId, limit) as Array<{
+    id: string;
+    author: string | null;
+    text: string;
+    like_count: number;
+    reply_count: number;
+    published_at: number | null;
+  }>;
+}
+
 export function competitorMedianViews(competitorId: number): number {
   const row = db
     .prepare(
