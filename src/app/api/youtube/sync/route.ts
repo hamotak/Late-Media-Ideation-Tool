@@ -1,15 +1,22 @@
 import {
+  commentCount,
+  createCommentSyncJob,
+  getActiveCommentSyncJob,
   getActiveTranscriptionJob,
   getIntegration,
   getSetting,
   getTranscript,
+  listChannelVideosForCommentSync,
   setActiveChannelId,
   setSetting,
+  updateCommentSyncJob,
   upsertChannel,
+  upsertComments,
   upsertTranscript,
   upsertVideo,
 } from "@/lib/db";
 import {
+  fetchCommentThreads,
   fetchTranscriptFree,
   fetchVideos,
   listUploadIds,
@@ -17,6 +24,98 @@ import {
   YouTubeApiError,
 } from "@/lib/youtube";
 import { log } from "@/lib/logger";
+
+/**
+ * After a channel sync brings in fresh videos, kick off a best-effort
+ * comment sync for the ones that have NO comments yet. We don't block
+ * on it — the sync route's `done` event already fired by the time this
+ * starts — but we DO surface progress via a `comment_sync_jobs` row so
+ * the /videos banner picks it up automatically.
+ *
+ * Scope: only "missing-comments" videos (HAVING comments_count = 0),
+ * cap at AUTO_COMMENT_SYNC_LIMIT, gentle pacing. With the default cap
+ * of 20 videos × 1 commentThreads.list call = 20 quota units, this
+ * doesn't meaningfully dent the 10k/day free quota.
+ */
+const AUTO_COMMENT_SYNC_LIMIT = 20;
+const AUTO_COMMENT_THREADS_PER_VIDEO = 100;
+const AUTO_COMMENT_PACE_MS = 200;
+
+async function autoSyncNewVideoComments(apiKey: string): Promise<void> {
+  // Bail if another comment-sync is already running — let it finish
+  // instead of racing it.
+  if (getActiveCommentSyncJob()) return;
+
+  const targets = listChannelVideosForCommentSync({
+    onlyMissing: true,
+    orderBy: "recent",
+    limit: AUTO_COMMENT_SYNC_LIMIT,
+  });
+  if (targets.length === 0) return;
+
+  const jobId = createCommentSyncJob(targets.length);
+  log.info("comments-sync", "Auto-sync after channel sync started", {
+    jobId,
+    videoCount: targets.length,
+  });
+
+  let done = 0;
+  let failed = 0;
+  let commentsAdded = 0;
+  let lastError: string | null = null;
+
+  for (const v of targets) {
+    updateCommentSyncJob(jobId, { current_video_id: v.id });
+    try {
+      const before = commentCount(v.id).total;
+      const threads = await fetchCommentThreads(v.id, apiKey, {
+        maxThreads: AUTO_COMMENT_THREADS_PER_VIDEO,
+        order: "relevance",
+      });
+      upsertComments(
+        threads.map((c) => ({
+          id: c.id,
+          video_id: v.id,
+          parent_id: c.parentId,
+          author: c.author,
+          author_channel_id: c.authorChannelId,
+          text: c.text,
+          like_count: c.likes,
+          reply_count: c.replyCount,
+          published_at: c.publishedAt,
+          updated_at: c.updatedAt,
+        }))
+      );
+      const after = commentCount(v.id).total;
+      commentsAdded += Math.max(0, after - before);
+      done++;
+    } catch (err) {
+      failed++;
+      lastError = err instanceof Error ? err.message : String(err);
+      // Per-video failures are common (comments disabled, removed
+      // videos, etc.). Don't tear down the auto-sync over them.
+    }
+    updateCommentSyncJob(jobId, {
+      done,
+      failed,
+      comments_added: commentsAdded,
+      last_error: lastError,
+    });
+    await new Promise((r) => setTimeout(r, AUTO_COMMENT_PACE_MS));
+  }
+
+  updateCommentSyncJob(jobId, {
+    status: failed === targets.length ? "failed" : "completed",
+    completed_at: Math.floor(Date.now() / 1000),
+    current_video_id: null,
+  });
+  log.info("comments-sync", "Auto-sync after channel sync finished", {
+    jobId,
+    done,
+    failed,
+    commentsAdded,
+  });
+}
 
 export const runtime = "nodejs";
 
@@ -197,6 +296,17 @@ export async function POST(req: Request) {
           idsListed: ids.length,
           transcripts: { saved: transcriptsSaved, failed: transcriptsFailed },
           durationMs: Date.now() - startedAt,
+        });
+
+        // Best-effort: auto-sync comments for the newest videos that
+        // don't have any in the local DB yet. FIRE-AND-FORGET so the
+        // SSE stream closes immediately and the user isn't kept
+        // waiting on the comment polls. The user-visible signal is the
+        // comment_sync_jobs row that the /videos banner picks up.
+        void autoSyncNewVideoComments(apiKey).catch((err) => {
+          log.warn("sync", "Auto-comment-sync after channel sync failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
         });
       } catch (err) {
         const status = err instanceof YouTubeApiError ? err.status : 500;

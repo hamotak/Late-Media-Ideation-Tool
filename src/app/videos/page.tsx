@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 import { TranscribeAllBanner } from "@/components/transcribe-all-banner";
+import { SyncAllCommentsBanner } from "@/components/sync-all-comments-banner";
 
 type Video = {
   id: string;
@@ -134,6 +135,7 @@ export default function VideosPage() {
       </header>
 
       <TranscribeAllBanner />
+      <SyncAllCommentsBanner />
 
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="relative max-w-md flex-1">

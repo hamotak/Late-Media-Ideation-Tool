@@ -1241,6 +1241,24 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tx_jobs_status ON transcription_jobs(status);
 
+  -- Bulk comment-sync progress tracking. Same shape as transcription_jobs
+  -- minus cost_cents (YouTube Data API comments are quota, not dollars)
+  -- plus comments_added so the banner can show "12,341 new comments
+  -- across 87 videos".
+  CREATE TABLE IF NOT EXISTS comment_sync_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    completed_at INTEGER,
+    total INTEGER NOT NULL,                  -- videos to process
+    done INTEGER NOT NULL DEFAULT 0,         -- videos processed
+    failed INTEGER NOT NULL DEFAULT 0,       -- videos that errored
+    comments_added INTEGER NOT NULL DEFAULT 0, -- total comments inserted across the batch
+    current_video_id TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    last_error TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_cs_jobs_status ON comment_sync_jobs(status);
+
   -- Per-turn Claude spend ledger. One row = one chat turn (user message →
   -- final assistant response). Tracks tokens separately for executor and
   -- advisor so we can see where the money actually goes. Cost in
@@ -2766,6 +2784,146 @@ export function updateTranscriptionJob(
   const setClause = keys.map((k) => `${k} = ?`).join(", ");
   const values = keys.map((k) => patch[k] as unknown);
   db.prepare(`UPDATE transcription_jobs SET ${setClause} WHERE id = ?`).run(...values, id);
+}
+
+/* ---------------------------------------------------------------------- *
+ * Comment-sync job tracking — same job-pattern as transcription_jobs but
+ * dimensioned around "videos processed" + "comments added" instead of
+ * cost in cents. Lets the /videos page run a single background sweep
+ * that syncs comments for every (or N) videos on the active channel,
+ * with live progress in a banner.
+ * ---------------------------------------------------------------------- */
+
+export type CommentSyncJob = {
+  id: number;
+  started_at: number;
+  completed_at: number | null;
+  total: number;
+  done: number;
+  failed: number;
+  comments_added: number;
+  current_video_id: string | null;
+  status: "running" | "completed" | "failed" | "cancelled";
+  last_error: string | null;
+};
+
+export function getActiveCommentSyncJob(): CommentSyncJob | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM comment_sync_jobs WHERE status = 'running' ORDER BY id DESC LIMIT 1`
+    )
+    .get() as CommentSyncJob | undefined;
+}
+
+export function getLatestCommentSyncJob(): CommentSyncJob | undefined {
+  return db
+    .prepare(`SELECT * FROM comment_sync_jobs ORDER BY id DESC LIMIT 1`)
+    .get() as CommentSyncJob | undefined;
+}
+
+export function createCommentSyncJob(total: number): number {
+  const info = db
+    .prepare(`INSERT INTO comment_sync_jobs (total, status) VALUES (?, 'running')`)
+    .run(total);
+  return info.lastInsertRowid as number;
+}
+
+export function updateCommentSyncJob(
+  id: number,
+  patch: Partial<Omit<CommentSyncJob, "id" | "started_at">>
+): void {
+  const keys = Object.keys(patch) as (keyof typeof patch)[];
+  if (keys.length === 0) return;
+  const setClause = keys.map((k) => `${k} = ?`).join(", ");
+  const values = keys.map((k) => patch[k] as unknown);
+  db.prepare(`UPDATE comment_sync_jobs SET ${setClause} WHERE id = ?`).run(
+    ...values,
+    id
+  );
+}
+
+/**
+ * Active-channel-scoped list of videos with their current comment-sync
+ * status (cached count + last-synced timestamp). Used by the bulk-
+ * sync-comments banner to decide what to enqueue.
+ *
+ *   onlyMissing — if true, only returns videos that have NEVER had
+ *     comments synced (no rows in the local `comments` table for that
+ *     video). Useful for the "sync new videos only" flow that runs
+ *     after a channel sync.
+ *   orderBy — same vocabulary as the transcribe picker. Default "recent"
+ *     because newly-uploaded videos get the most comment activity.
+ *   limit — cap on the result set.
+ */
+export function listChannelVideosForCommentSync(
+  opts: {
+    onlyMissing?: boolean;
+    orderBy?: "views" | "recent" | "oldest";
+    limit?: number;
+  } = {}
+): Array<{
+  id: string;
+  title: string;
+  views: number;
+  published_at: number | null;
+  comments_count: number; // local DB count, not the YouTube `comments` column
+  last_synced_at: number | null;
+}> {
+  const activeId = getActiveChannelId();
+  if (!activeId) return [];
+
+  const order =
+    opts.orderBy === "views"
+      ? "v.views DESC"
+      : opts.orderBy === "oldest"
+        ? "COALESCE(v.published_at, v.imported_at) ASC"
+        : "COALESCE(v.published_at, v.imported_at) DESC";
+
+  // Aggregate over the comments table once per video. LEFT JOIN keeps
+  // videos with no comments synced yet.
+  const missingClause = opts.onlyMissing
+    ? "HAVING comments_count = 0"
+    : "";
+
+  const limitClause =
+    opts.limit && opts.limit > 0
+      ? `LIMIT ${Math.floor(Math.max(1, opts.limit))}`
+      : "";
+
+  const sql = `
+    SELECT
+      v.id,
+      v.title,
+      v.views,
+      v.published_at,
+      COUNT(c.id) AS comments_count,
+      MAX(c.fetched_at) AS last_synced_at
+    FROM videos v
+    LEFT JOIN comments c ON c.video_id = v.id
+    WHERE v.channel_id = ?
+    GROUP BY v.id
+    ${missingClause}
+    ORDER BY ${order}
+    ${limitClause}
+  `;
+
+  const rows = db.prepare(sql).all(activeId) as Array<{
+    id: string;
+    title: string;
+    views: number | null;
+    published_at: number | null;
+    comments_count: number;
+    last_synced_at: number | null;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    views: r.views ?? 0,
+    published_at: r.published_at,
+    comments_count: r.comments_count,
+    last_synced_at: r.last_synced_at,
+  }));
 }
 
 export function clearLogs(opts: { level?: LogLevel; olderThanSec?: number } = {}): number {
