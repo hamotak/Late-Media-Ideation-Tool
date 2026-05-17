@@ -44,6 +44,7 @@ import {
 type Session = {
   id: string;
   title: string | null;
+  channel_id: string | null;
   created_at: number;
   last_message_at: number;
   message_count: number;
@@ -171,6 +172,10 @@ function ChatPageInner() {
   const searchParams = useSearchParams();
   const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [untaggedSessions, setUntaggedSessions] = useState<Session[]>([]);
+  const [activeChannelId, setActiveChannelId] = useState<string | null>(null);
+  const [activeChannelTitle, setActiveChannelTitle] = useState<string | null>(null);
+  const [showUntagged, setShowUntagged] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -254,12 +259,44 @@ function ChatPageInner() {
     el.style.height = `${next}px`;
   }, [input]);
 
-  const refreshSessions = useCallback(async () => {
-    const res = await fetch("/api/sessions");
-    const data = await res.json();
-    setSessions(data.sessions ?? []);
-    return data.sessions as Session[];
+  // Resolve the server-side active channel once so the sidebar can scope
+  // its list. Falls back to "all sessions" if the channels endpoint
+  // doesn't return an active id (no channel bound yet, fresh install).
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/channels", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d: { activeId?: string | null; channels?: Array<{ id: string; title: string | null }> }) => {
+        if (cancelled) return;
+        setActiveChannelId(d.activeId ?? null);
+        const match = d.channels?.find((c) => c.id === d.activeId);
+        setActiveChannelTitle(match?.title ?? null);
+      })
+      .catch(() => {
+        /* silent — sidebar will show all sessions */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  const refreshSessions = useCallback(async () => {
+    // Two parallel fetches: active-channel sessions (the primary list)
+    // and untagged sessions (legacy rows that pre-date the per-channel
+    // migration). If no active channel is bound, fall back to "all".
+    const scopedUrl = activeChannelId
+      ? `/api/sessions?channelId=${encodeURIComponent(activeChannelId)}`
+      : "/api/sessions";
+    const [scoped, untagged] = await Promise.all([
+      fetch(scopedUrl).then((r) => r.json()),
+      activeChannelId
+        ? fetch("/api/sessions?channelId=untagged").then((r) => r.json())
+        : Promise.resolve({ sessions: [] }),
+    ]);
+    setSessions(scoped.sessions ?? []);
+    setUntaggedSessions(untagged.sessions ?? []);
+    return scoped.sessions as Session[];
+  }, [activeChannelId]);
 
   const loadSession = useCallback(async (id: string) => {
     setActiveId(id);
@@ -664,44 +701,115 @@ function ChatPageInner() {
           </Button>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-3">
-          {sessions.length === 0 ? (
+          {/* Active-channel hint — clarifies the sidebar is scoped. Only
+              renders when there IS an active channel; on fresh installs
+              the sidebar shows everything and this label would lie. */}
+          {activeChannelId && (
+            <div
+              className="px-3 pb-1 pt-1 text-[10px] uppercase tracking-wide text-muted-foreground"
+              data-testid="chat-sidebar-channel-label"
+            >
+              {activeChannelTitle ?? "Active channel"}
+            </div>
+          )}
+          {sessions.length === 0 && untaggedSessions.length === 0 ? (
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
               {t.chat.noSessions}
             </div>
           ) : (
-            <ul className="space-y-0.5">
-              {sessions.map((s) => (
-                <li key={s.id}>
-                  <div
-                    className={cn(
-                      "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                      activeId === s.id
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-accent/60 text-foreground/80"
-                    )}
-                  >
-                    <button
-                      onClick={() => loadSession(s.id)}
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                    >
-                      <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <span className="truncate">
-                        {s.title ?? t.chat.untitled}
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (confirm(t.chat.deleteConfirm)) deleteSession(s.id);
-                      }}
-                      className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-                      aria-label="Delete"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+            <>
+              {sessions.length > 0 ? (
+                <ul className="space-y-0.5" data-testid="chat-sidebar-sessions">
+                  {sessions.map((s) => (
+                    <li key={s.id}>
+                      <div
+                        className={cn(
+                          "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                          activeId === s.id
+                            ? "bg-accent text-accent-foreground"
+                            : "hover:bg-accent/60 text-foreground/80"
+                        )}
+                      >
+                        <button
+                          onClick={() => loadSession(s.id)}
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                        >
+                          <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="truncate">
+                            {s.title ?? t.chat.untitled}
+                          </span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (confirm(t.chat.deleteConfirm)) deleteSession(s.id);
+                          }}
+                          className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                          aria-label="Delete"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                activeChannelId && (
+                  <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                    No chats yet for this channel.
                   </div>
-                </li>
-              ))}
-            </ul>
+                )
+              )}
+              {/* Untagged: chats from before the per-channel migration land
+                  here. Collapsible so they don't clutter day-to-day use. */}
+              {untaggedSessions.length > 0 && (
+                <div className="mt-3 border-t border-border/60 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowUntagged((v) => !v)}
+                    className="flex w-full items-center justify-between px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                  >
+                    <span>Untagged ({untaggedSessions.length})</span>
+                    <span>{showUntagged ? "−" : "+"}</span>
+                  </button>
+                  {showUntagged && (
+                    <ul className="mt-1 space-y-0.5">
+                      {untaggedSessions.map((s) => (
+                        <li key={s.id}>
+                          <div
+                            className={cn(
+                              "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                              activeId === s.id
+                                ? "bg-accent text-accent-foreground"
+                                : "hover:bg-accent/60 text-foreground/80"
+                            )}
+                          >
+                            <button
+                              onClick={() => loadSession(s.id)}
+                              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                            >
+                              <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                              <span className="truncate">
+                                {s.title ?? t.chat.untitled}
+                              </span>
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (confirm(t.chat.deleteConfirm))
+                                  deleteSession(s.id);
+                              }}
+                              className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                              aria-label="Delete"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       </aside>

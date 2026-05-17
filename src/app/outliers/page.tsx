@@ -95,7 +95,7 @@ type FormatRow = {
 };
 
 const VIEW_MODE_KEY = "dashboard.viewMode";
-type TabName = "recent" | "patterns" | "gaps";
+type TabName = "recent" | "trending" | "gaps";
 
 /* ---------------- Recent + Topics Gap types (shared) ---------------- */
 
@@ -184,18 +184,20 @@ function OutliersInner() {
   const searchParams = useSearchParams();
   // Default landing tab is Recent — the sidebar badge expects unread
   // discoveries to be one click away, and most session entries come via
-  // that badge. Patterns / Gaps remain reachable via ?tab=.
+  // that badge. Trending Formats / Gaps remain reachable via ?tab=.
   const tabParam = searchParams.get("tab");
   const activeTab: TabName =
-    tabParam === "patterns" || tabParam === "gaps" ? tabParam : "recent";
+    tabParam === "trending" || tabParam === "gaps" ? tabParam : "recent";
 
-  // ?tab=library is a legacy deep-link from before Recent and Library
-  // were merged. Soft-redirect to Recent so old bookmarks land on the
-  // canonical surface without a 404 or stale tab name.
+  // Legacy deep-links: ?tab=library (the old Library tab pre-merge) and
+  // ?tab=patterns (the old name for Trending Formats) both soft-redirect
+  // to keep external bookmarks alive. Library lands on Recent; Patterns
+  // lands on Trending.
   useEffect(() => {
-    if (tabParam === "library") {
+    if (tabParam === "library" || tabParam === "patterns") {
       const qs = new URLSearchParams(searchParams.toString());
-      qs.delete("tab");
+      if (tabParam === "library") qs.delete("tab");
+      else qs.set("tab", "trending");
       router.replace(
         `${pathname}${qs.toString() ? `?${qs.toString()}` : ""}`
       );
@@ -274,10 +276,10 @@ function OutliersInner() {
           Recent
         </TabLink>
         <TabLink
-          active={activeTab === "patterns"}
-          onClick={() => goTab("patterns")}
+          active={activeTab === "trending"}
+          onClick={() => goTab("trending")}
         >
-          Patterns
+          Trending Formats
         </TabLink>
         <TabLink
           active={activeTab === "gaps"}
@@ -290,7 +292,7 @@ function OutliersInner() {
 
       {activeTab === "recent" ? (
         <RecentTab scope={scope} />
-      ) : activeTab === "patterns" ? (
+      ) : activeTab === "trending" ? (
         <PatternsTab scope={scope} />
       ) : (
         <TopicsGapTab scope={scope} />
@@ -391,7 +393,7 @@ function RecentTab({ scope }: { scope: string | "all" | null }) {
 
   const hideOutlier = async (videoId: string, competitorId: number) => {
     const ok = window.confirm(
-      "Hide this outlier? It'll disappear from /outliers, Patterns extraction, Topics Gap, and chat results. Restore from Settings → Hidden outliers (coming soon)."
+      "Hide this outlier? It'll disappear from /outliers, Trending Formats extraction, Topics Gap, and chat results. Restore from Settings → Hidden outliers (coming soon)."
     );
     if (!ok) return;
     try {
@@ -1132,7 +1134,7 @@ function ExplainModal({
   );
 }
 
-/* ---------------- Patterns tab (Format Library) ---------------- */
+/* ---------------- Trending Formats tab (Format Library) ---------------- */
 
 type SortKey = "rising" | "avgMultiplier" | "totalViewsMonth";
 
@@ -1260,7 +1262,7 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
           ) : (
             <RefreshCw className="h-3.5 w-3.5" />
           )}
-          {formats && formats.length > 0 ? "Re-extract" : "Extract"} format patterns
+          {formats && formats.length > 0 ? "Re-extract" : "Extract"} trending formats
         </Button>
       </div>
 
@@ -1318,7 +1320,7 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
               No formats extracted yet
             </h3>
             <p className="mx-auto max-w-md text-sm text-muted-foreground">
-              Click <strong>Extract format patterns</strong> above to have
+              Click <strong>Extract trending formats</strong> above to have
               Claude group your current outliers into structural title
               templates (per MENTOR_METHOD §4). Takes 15–30 seconds.
             </p>

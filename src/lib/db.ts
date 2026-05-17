@@ -193,9 +193,41 @@ try {
   if (!cols.some((c) => c.name === "pending_since")) {
     db.exec(`ALTER TABLE chat_sessions ADD COLUMN pending_since INTEGER`);
   }
+  // Per-channel chat scoping. Existing rows land with NULL — the sidebar
+  // surfaces those in a collapsible "Untagged" section at the bottom.
+  // New sessions get channel_id bound at create time (server-side from
+  // getActiveChannelId).
+  if (!cols.some((c) => c.name === "channel_id")) {
+    db.exec(`ALTER TABLE chat_sessions ADD COLUMN channel_id TEXT`);
+  }
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_chat_sessions_channel
+       ON chat_sessions(channel_id, created_at DESC)`
+  );
 } catch {
   /* noop */
 }
+
+// Per-channel agent memory. One row per (channel, key) — durable facts
+// the agent should keep in mind across chat sessions. Written by the
+// save_channel_memory chat tool (two-step confirm) and the /channel-info
+// Agent memory panel. Cleared by forget_channel_memory or the panel.
+// ON DELETE CASCADE cleans up if the user removes the channel.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS channel_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    source TEXT,
+    confidence REAL NOT NULL DEFAULT 0.8,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(channel_id, key),
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_channel_memory_lookup
+    ON channel_memory(channel_id, confidence DESC, updated_at DESC);
+`);
 
 // Generic key-value cache with TTL — used for caching expensive YouTube
 // Analytics API responses so we don't hammer Google on every page load.
@@ -338,6 +370,7 @@ export function searchTranscripts(
 export type ChatSession = {
   id: string;
   title: string | null;
+  channel_id: string | null;
   created_at: number;
   last_message_at: number;
   message_count: number;
@@ -356,10 +389,15 @@ export type StoredAttachment =
   | { type: "video"; id: string; title: string; thumbnail: string | null }
   | { type: "comment"; id: string; title: string; thumbnail: null };
 
-export function createSession(id: string, title: string | null = null): void {
+export function createSession(
+  id: string,
+  title: string | null = null,
+  channelId: string | null = null
+): void {
   db.prepare(
-    `INSERT INTO chat_sessions (id, title, created_at) VALUES (?, ?, strftime('%s','now'))`
-  ).run(id, title);
+    `INSERT INTO chat_sessions (id, title, channel_id, created_at)
+     VALUES (?, ?, ?, strftime('%s','now'))`
+  ).run(id, title, channelId);
 }
 
 export function renameSession(id: string, title: string): void {
@@ -396,12 +434,60 @@ export function isSessionPending(id: string): boolean {
   return age < PENDING_TTL_SEC;
 }
 
-export function listSessions(): ChatSession[] {
+/**
+ * List chat sessions. With `scope`:
+ *   - undefined / null      → ALL sessions (every channel + untagged)
+ *   - "untagged"            → channel_id IS NULL only
+ *   - any channel id string → that channel only
+ *
+ * Existing rows from before the per-channel migration have NULL channel_id
+ * — those surface under "untagged" so the user can find them.
+ */
+export function listSessions(
+  scope?: string | null | "untagged"
+): ChatSession[] {
+  if (scope === "untagged") {
+    return db
+      .prepare(
+        `SELECT
+           s.id,
+           s.title,
+           s.channel_id,
+           s.created_at,
+           COALESCE(MAX(m.created_at), s.created_at) AS last_message_at,
+           COUNT(m.id) AS message_count
+         FROM chat_sessions s
+         LEFT JOIN chat_messages m ON m.session_id = s.id
+         WHERE s.channel_id IS NULL
+         GROUP BY s.id
+         ORDER BY last_message_at DESC`
+      )
+      .all() as ChatSession[];
+  }
+  if (typeof scope === "string" && scope.length > 0) {
+    return db
+      .prepare(
+        `SELECT
+           s.id,
+           s.title,
+           s.channel_id,
+           s.created_at,
+           COALESCE(MAX(m.created_at), s.created_at) AS last_message_at,
+           COUNT(m.id) AS message_count
+         FROM chat_sessions s
+         LEFT JOIN chat_messages m ON m.session_id = s.id
+         WHERE s.channel_id = ?
+         GROUP BY s.id
+         ORDER BY last_message_at DESC`
+      )
+      .all(scope) as ChatSession[];
+  }
   return db
     .prepare(
       `SELECT
          s.id,
          s.title,
+         s.channel_id,
          s.created_at,
          COALESCE(MAX(m.created_at), s.created_at) AS last_message_at,
          COUNT(m.id) AS message_count
@@ -419,6 +505,7 @@ export function getSession(id: string): ChatSession | undefined {
       `SELECT
          s.id,
          s.title,
+         s.channel_id,
          s.created_at,
          COALESCE(MAX(m.created_at), s.created_at) AS last_message_at,
          COUNT(m.id) AS message_count
@@ -616,6 +703,81 @@ export function updateChannelContextBatch(
       | Channel
       | undefined) ?? null
   );
+}
+
+/* ---------- Channel memory ---------- */
+/**
+ * Durable per-channel facts the agent should remember across chats.
+ * Schema lives at module init above (CREATE TABLE IF NOT EXISTS
+ * channel_memory). Keyed by (channel_id, key) — upsert overwrites.
+ * Confidence defaults to 0.8 when written by chat tools; the
+ * /channel-info UI panel can leave it default or surface a slider.
+ */
+export type ChannelMemory = {
+  id: number;
+  channel_id: string;
+  key: string;
+  value: string;
+  source: string | null;
+  confidence: number;
+  updated_at: number;
+};
+
+export function listChannelMemory(channelId: string): ChannelMemory[] {
+  return db
+    .prepare(
+      `SELECT id, channel_id, key, value, source, confidence, updated_at
+       FROM channel_memory
+       WHERE channel_id = ?
+       ORDER BY confidence DESC, updated_at DESC`
+    )
+    .all(channelId) as ChannelMemory[];
+}
+
+export function getChannelMemory(
+  channelId: string,
+  key: string
+): ChannelMemory | null {
+  return (
+    (db
+      .prepare(
+        `SELECT id, channel_id, key, value, source, confidence, updated_at
+         FROM channel_memory
+         WHERE channel_id = ? AND key = ?`
+      )
+      .get(channelId, key) as ChannelMemory | undefined) ?? null
+  );
+}
+
+export function upsertChannelMemory(opts: {
+  channelId: string;
+  key: string;
+  value: string;
+  source?: string | null;
+  confidence?: number;
+}): ChannelMemory | null {
+  const confidence =
+    typeof opts.confidence === "number"
+      ? Math.max(0, Math.min(1, opts.confidence))
+      : 0.8;
+  db.prepare(
+    `INSERT INTO channel_memory
+       (channel_id, key, value, source, confidence, updated_at)
+     VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
+     ON CONFLICT(channel_id, key) DO UPDATE SET
+       value      = excluded.value,
+       source     = excluded.source,
+       confidence = excluded.confidence,
+       updated_at = strftime('%s','now')`
+  ).run(opts.channelId, opts.key, opts.value, opts.source ?? null, confidence);
+  return getChannelMemory(opts.channelId, opts.key);
+}
+
+export function deleteChannelMemory(channelId: string, key: string): boolean {
+  const info = db
+    .prepare(`DELETE FROM channel_memory WHERE channel_id = ? AND key = ?`)
+    .run(channelId, key);
+  return info.changes > 0;
 }
 
 /* ---------- Tags ---------- */

@@ -446,6 +446,8 @@ function SingleChannelCard({
               onUpdated={onUpdated}
             />
           ))}
+          <SectionDivider label="Agent memory" />
+          <AgentMemoryPanel channelId={channel.channelId} />
         </CardContent>
       </Card>
 
@@ -591,6 +593,265 @@ function ContextField({
         </div>
       ) : (
         <ReadValue value={value} field={field} />
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Agent memory panel ---------------- */
+
+type MemoryRow = {
+  id: number;
+  channel_id: string;
+  key: string;
+  value: string;
+  source: string | null;
+  confidence: number;
+  updated_at: number;
+};
+
+function AgentMemoryPanel({ channelId }: { channelId: string }) {
+  const [rows, setRows] = useState<MemoryRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [draftKey, setDraftKey] = useState("");
+  const [draftValue, setDraftValue] = useState("");
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [editKey, setEditKey] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch(
+        `/api/channel-info/memory?channelId=${encodeURIComponent(channelId)}`,
+        { cache: "no-store" }
+      );
+      const d = (await r.json()) as { memory?: MemoryRow[]; error?: string };
+      if (d.error) {
+        setError(d.error);
+        setRows([]);
+        return;
+      }
+      setRows(d.memory ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to load memory");
+    }
+  }, [channelId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const upsert = async (key: string, value: string) => {
+    setBusyKey(key);
+    setError(null);
+    try {
+      const r = await fetch("/api/channel-info/memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelId, key, value }),
+      });
+      if (!r.ok) {
+        const d = (await r.json().catch(() => ({}))) as { error?: string };
+        setError(d.error ?? `HTTP ${r.status}`);
+        return;
+      }
+      await load();
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const remove = async (key: string) => {
+    if (!window.confirm(`Delete memory "${key}"?`)) return;
+    setBusyKey(key);
+    setError(null);
+    try {
+      const r = await fetch("/api/channel-info/memory", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelId, key }),
+      });
+      if (!r.ok) {
+        const d = (await r.json().catch(() => ({}))) as { error?: string };
+        setError(d.error ?? `HTTP ${r.status}`);
+        return;
+      }
+      await load();
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const startEdit = (row: MemoryRow) => {
+    setEditKey(row.key);
+    setEditValue(row.value);
+  };
+
+  const saveEdit = async () => {
+    if (!editKey) return;
+    await upsert(editKey, editValue.trim());
+    setEditKey(null);
+    setEditValue("");
+  };
+
+  const onAdd = async () => {
+    const k = draftKey.trim();
+    const v = draftValue.trim();
+    if (!k || !v) {
+      setError("Both key and value are required.");
+      return;
+    }
+    await upsert(k, v);
+    setDraftKey("");
+    setDraftValue("");
+    setAdding(false);
+  };
+
+  return (
+    <div data-testid="agent-memory-panel">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="text-xs text-muted-foreground">
+          Durable facts the chat agent remembers across sessions for this
+          channel. The agent can propose saves via the chat tools (with
+          confirmation); you can also add or edit them here directly.
+        </p>
+        {!adding && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setAdding(true)}
+            className="shrink-0 gap-1.5"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            Add fact
+          </Button>
+        )}
+      </div>
+      {error && (
+        <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1.5 text-xs text-destructive">
+          {error}
+        </div>
+      )}
+      {adding && (
+        <div className="mb-3 space-y-2 rounded-md border border-border/60 p-3">
+          <input
+            type="text"
+            placeholder="key (snake_case, e.g. sponsor_policy)"
+            value={draftKey}
+            onChange={(e) => setDraftKey(e.target.value)}
+            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <textarea
+            placeholder="value (prose — what the agent should remember)"
+            value={draftValue}
+            onChange={(e) => setDraftValue(e.target.value)}
+            rows={2}
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={onAdd} disabled={busyKey === draftKey.trim()}>
+              <Check className="mr-1 h-3.5 w-3.5" />
+              Save fact
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setAdding(false);
+                setDraftKey("");
+                setDraftValue("");
+                setError(null);
+              }}
+            >
+              <X className="mr-1 h-3.5 w-3.5" />
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+      {rows === null ? (
+        <div className="py-4 text-center text-xs text-muted-foreground">
+          Loading…
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border/60 px-3 py-6 text-center text-xs text-muted-foreground">
+          No facts saved yet. The agent will start proposing saves as the
+          user describes durable channel traits in chat.
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {rows.map((row) => (
+            <li
+              key={row.id}
+              className="rounded-md border border-border/60 p-2"
+            >
+              <div className="mb-1 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                <span className="font-mono font-medium text-foreground">
+                  {row.key}
+                </span>
+                <span>conf {row.confidence.toFixed(2)}</span>
+                {row.source && <span>· {row.source}</span>}
+              </div>
+              {editKey === row.key ? (
+                <div className="space-y-2">
+                  <textarea
+                    value={editValue}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    rows={2}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      onClick={saveEdit}
+                      disabled={busyKey === row.key}
+                    >
+                      <Check className="mr-1 h-3.5 w-3.5" />
+                      Save
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setEditKey(null);
+                        setEditValue("");
+                      }}
+                    >
+                      <X className="mr-1 h-3.5 w-3.5" />
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start justify-between gap-2">
+                  <div className="whitespace-pre-wrap text-sm">
+                    {row.value}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => startEdit(row)}
+                      aria-label={`Edit ${row.key}`}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => remove(row.key)}
+                      aria-label={`Delete ${row.key}`}
+                      disabled={busyKey === row.key}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

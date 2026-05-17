@@ -5,16 +5,12 @@ import {
   getCompetitorVideosByIds,
   getIntegration,
   getOutlierExplanation,
-  getSetting,
   getTranscript,
-  setSetting,
   upsertOutlierExplanation,
 } from "./db";
 import { providerModelId } from "./ai-provider-types";
 import { extractSection, LEVERS, loadMentorMethod } from "./mentor-method";
 import { log } from "./logger";
-
-const RATE_LIMIT_WINDOW_SEC = 24 * 60 * 60;
 
 export type ExplainResult =
   | {
@@ -85,19 +81,7 @@ export async function explainOutlier(opts: {
     return { ok: false, status: 404, error: "competitor not found" };
   }
 
-  // Rate limit (only for non-cached calls).
-  const rateKey = `analyze_ai.outlier_explain.last_run.${videoId}`;
-  const last = Number(getSetting(rateKey) ?? "0");
   const now = Math.floor(Date.now() / 1000);
-  if (last > 0 && now - last < RATE_LIMIT_WINDOW_SEC) {
-    return {
-      ok: false,
-      status: 429,
-      error: "Explain is rate-limited per video (1 per 24h)",
-      retryAfterSec: RATE_LIMIT_WINDOW_SEC - (now - last),
-    };
-  }
-
   const apiKey = getIntegration("claude")?.api_key;
   if (!apiKey) {
     return {
@@ -189,7 +173,6 @@ export async function explainOutlier(opts: {
     explanation,
     model,
   });
-  setSetting(rateKey, String(now));
   log.info(
     "claude",
     `Outlier-explain ${videoId}: cached ${levers.length} levers from ${model}`

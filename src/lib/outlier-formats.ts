@@ -4,10 +4,8 @@ import {
   getExampleVideosForFormat,
   getFormatWeeklyHistogram,
   getIntegration,
-  getSetting,
   listFormatsForChannel,
   rebuildFormatVideoLinks,
-  setSetting,
   upsertOutlierFormat,
   type OutlierFormat,
 } from "./db";
@@ -15,8 +13,6 @@ import { providerModelId } from "./ai-provider-types";
 import { extractSection, loadMentorMethod } from "./mentor-method";
 import { listOutliersForActiveChannel } from "./outliers";
 import { log } from "./logger";
-
-const EXTRACT_RATE_LIMIT_SEC = 30 * 60; // 1 re-extract per channel per 30 min
 
 export type ExtractResult =
   | {
@@ -41,7 +37,8 @@ export type ExtractResult =
  *      video ids; compute metrics; upsert into outlier_formats + rebuild
  *      its link table with multiplier snapshots.
  *
- * Rate-limited to 1 call per channel per 30 min via the settings table.
+ * No rate limit — re-extract is a user-triggered, cost-aware action.
+ * If perf or cost becomes an issue we'll add real queueing.
  * Never throws — every error mode returns a structured `ok: false`.
  */
 export async function extractFormatsFromOutliers(
@@ -52,18 +49,7 @@ export async function extractFormatsFromOutliers(
     return { ok: false, status: 400, error: "userChannelId required" };
   }
 
-  const rateKey = `outlier_formats.last_extract.${channelId}`;
-  const last = Number(getSetting(rateKey) ?? "0");
   const now = Math.floor(Date.now() / 1000);
-  if (last > 0 && now - last < EXTRACT_RATE_LIMIT_SEC) {
-    return {
-      ok: false,
-      status: 429,
-      error: "Format extraction is rate-limited per channel (1 per 30 min)",
-      retryAfterSec: EXTRACT_RATE_LIMIT_SEC - (now - last),
-    };
-  }
-
   const apiKey = getIntegration("claude")?.api_key;
   if (!apiKey) {
     return {
@@ -227,7 +213,6 @@ export async function extractFormatsFromOutliers(
     videosLinked += validIds.length;
   }
 
-  setSetting(rateKey, String(now));
   log.info(
     "claude",
     `Format-extract ${channelId}: ${formatsCreated} formats, ${videosLinked} video links, from ${outliers.length} outliers`
