@@ -165,12 +165,14 @@ export default function TutorialPage() {
             App preferences.
           </PageDescription>
 
-          <PageDescription name="Outliers" status="coming-soon">
+          <PageDescription name="Outliers" href="/outliers" status="active">
             Live feed of competitor videos that overperformed their own
-            channel&apos;s 30-day median by 3× or more. Click any outlier to see
-            &ldquo;what made it work&rdquo; tags (curiosity, nostalgia,
-            counterintuitive, etc.) and save its title format or thumbnail
-            format.
+            channel&apos;s median by 3× or more. Click any outlier and Claude
+            tags it with &ldquo;what made it work&rdquo; levers (curiosity,
+            nostalgia, counterintuitive, etc.) plus a 2-3 sentence reasoning.
+            The &ldquo;Generate ideas&rdquo; button reads your channel context
+            and the visible outliers, then proposes 5–10 video ideas grounded
+            in the methodology.
           </PageDescription>
 
           <PageDescription name="Styles Library" status="coming-soon">
@@ -194,7 +196,9 @@ export default function TutorialPage() {
           <PageDescription name="Topic Ideation" status="coming-soon">
             The synthesizer. Pick a channel → Claude generates 10 video ideas
             using your channel context + recent outliers + saved title /
-            thumbnail formats. Approve, edit, or trash each one.
+            thumbnail formats. Approve, edit, or trash each one. v0 available
+            now via the &ldquo;Generate ideas&rdquo; button on the Outliers
+            page. Full standalone page lands in a later step.
           </PageDescription>
         </div>
       </Section>

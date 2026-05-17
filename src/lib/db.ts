@@ -3602,3 +3602,325 @@ export function upsertCommentAnalysis(a: CommentAnalysis): void {
   );
 }
 
+/* ============================================================
+ * OUTLIER EXPLANATIONS (Phase E — /outliers page)
+ *
+ * Claude's "what made it work" lever tagging + 2-3-sentence reasoning
+ * for a single competitor video that beat its own channel's median by
+ * ≥ the configured multiplier. Per MENTOR_METHOD §2 + §9. Cached
+ * permanently (lever attribution doesn't change as the video ages);
+ * cascaded delete via competitor_id when a competitor is removed.
+ * ============================================================ */
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS outlier_explanations (
+    video_id TEXT PRIMARY KEY,
+    competitor_id INTEGER NOT NULL,
+    levers TEXT NOT NULL,             -- JSON array of lever strings
+    explanation TEXT NOT NULL,        -- 2-3 sentences plain English
+    generated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    model TEXT,                       -- e.g. "claude-sonnet-4-6"
+    FOREIGN KEY (competitor_id) REFERENCES competitors(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_outlier_explanations_competitor
+    ON outlier_explanations(competitor_id);
+`);
+
+export type OutlierExplanation = {
+  videoId: string;
+  competitorId: number;
+  levers: string[];
+  explanation: string;
+  generatedAt: number;
+  model: string | null;
+};
+
+export function getOutlierExplanation(
+  videoId: string
+): OutlierExplanation | null {
+  const row = db
+    .prepare(
+      `SELECT video_id, competitor_id, levers, explanation, generated_at, model
+       FROM outlier_explanations WHERE video_id = ?`
+    )
+    .get(videoId) as
+    | {
+        video_id: string;
+        competitor_id: number;
+        levers: string;
+        explanation: string;
+        generated_at: number;
+        model: string | null;
+      }
+    | undefined;
+  if (!row) return null;
+  let levers: string[] = [];
+  try {
+    const parsed = JSON.parse(row.levers);
+    if (Array.isArray(parsed)) levers = parsed.filter((v) => typeof v === "string");
+  } catch {
+    /* keep [] */
+  }
+  return {
+    videoId: row.video_id,
+    competitorId: row.competitor_id,
+    levers,
+    explanation: row.explanation,
+    generatedAt: row.generated_at,
+    model: row.model,
+  };
+}
+
+export function upsertOutlierExplanation(input: {
+  videoId: string;
+  competitorId: number;
+  levers: string[];
+  explanation: string;
+  model: string | null;
+}): void {
+  db.prepare(
+    `INSERT INTO outlier_explanations
+       (video_id, competitor_id, levers, explanation, generated_at, model)
+     VALUES (?, ?, ?, ?, strftime('%s','now'), ?)
+     ON CONFLICT(video_id) DO UPDATE SET
+       levers = excluded.levers,
+       explanation = excluded.explanation,
+       generated_at = strftime('%s','now'),
+       model = excluded.model`
+  ).run(
+    input.videoId,
+    input.competitorId,
+    JSON.stringify(input.levers),
+    input.explanation,
+    input.model
+  );
+}
+
+/**
+ * Outliers query for the /outliers page. Returns competitor videos
+ * whose views exceed `minMultiplier × the competitor's own median over
+ * the same window`, per MENTOR_METHOD §2. Scoped to one user channel's
+ * competitors or "all" (null) across every user channel. Tier filter
+ * is a 4-slot array — pass empty string in unused slots to no-op.
+ *
+ * One SQL pass — uses window functions for per-competitor median, then
+ * joins back to the in-window videos and applies the multiplier filter.
+ * No N+1. Capped at 50 results, sorted by multiplier DESC then views DESC.
+ */
+export type OutlierRow = {
+  videoId: string;
+  title: string;
+  thumbnailUrl: string | null;
+  views: number;
+  publishedAt: number | null;
+  durationSeconds: number | null;
+  competitorId: number;
+  competitorTitle: string | null;
+  competitorHandle: string | null;
+  competitorAvatar: string | null;
+  tier: string;
+  multiplier: number;
+  channelMedian: number;
+};
+
+export function outliersForUserChannel(opts: {
+  userChannelId: string | null; // null = across all user channels
+  windowDays: number;            // 7 | 30 | 90
+  minMultiplier: number;         // >= 1
+  tiers: readonly string[];      // subset of ["authority","breakthrough","adjacent","far"]
+  limit?: number;
+}): {
+  outliers: OutlierRow[];
+  totalScanned: number;
+  competitorsCovered: number;
+} {
+  const limit = Math.min(opts.limit ?? 50, 200);
+  // Tier IN-list — pad to 4 slots so the prepared statement has a fixed
+  // arity. Unused slots get an impossible value so they no-op.
+  const tierSlots: [string, string, string, string] = ["", "", "", ""];
+  for (let i = 0; i < Math.min(opts.tiers.length, 4); i++) {
+    tierSlots[i] = opts.tiers[i];
+  }
+
+  const scope = opts.userChannelId; // null | string
+
+  const outliers = db
+    .prepare(
+      `WITH scoped_videos AS (
+         SELECT
+           cv.video_id, cv.title, cv.thumbnail_url, cv.views,
+           cv.published_at, cv.duration_seconds,
+           cv.competitor_id,
+           c.title       AS competitor_title,
+           c.handle      AS competitor_handle,
+           c.avatar_url  AS competitor_avatar,
+           c.tier,
+           c.user_channel_id,
+           ROW_NUMBER() OVER (PARTITION BY cv.competitor_id ORDER BY cv.views) AS rn,
+           COUNT(*)     OVER (PARTITION BY cv.competitor_id)                  AS n_in_window
+         FROM competitor_videos cv
+         JOIN competitors c ON c.id = cv.competitor_id
+         WHERE cv.published_at >= strftime('%s','now') - ? * 86400
+           AND (? IS NULL OR c.user_channel_id = ?)
+           AND c.tier IN (?, ?, ?, ?)
+       ),
+       qualified_medians AS (
+         SELECT competitor_id, AVG(views) AS median_views
+         FROM scoped_videos
+         WHERE n_in_window >= 5
+           AND rn IN ((n_in_window + 1) / 2, (n_in_window + 2) / 2)
+         GROUP BY competitor_id
+       )
+       SELECT
+         v.video_id, v.title, v.thumbnail_url, v.views,
+         v.published_at, v.duration_seconds,
+         v.competitor_id, v.competitor_title, v.competitor_handle,
+         v.competitor_avatar, v.tier,
+         CAST(m.median_views AS INTEGER)   AS channel_median,
+         (v.views * 1.0 / m.median_views)  AS multiplier
+       FROM scoped_videos v
+       JOIN qualified_medians m ON m.competitor_id = v.competitor_id
+       WHERE v.views > ? * m.median_views
+       ORDER BY multiplier DESC, v.views DESC
+       LIMIT ?`
+    )
+    .all(
+      opts.windowDays,
+      scope,
+      scope,
+      tierSlots[0],
+      tierSlots[1],
+      tierSlots[2],
+      tierSlots[3],
+      opts.minMultiplier,
+      limit
+    ) as Array<{
+    video_id: string;
+    title: string;
+    thumbnail_url: string | null;
+    views: number;
+    published_at: number | null;
+    duration_seconds: number | null;
+    competitor_id: number;
+    competitor_title: string | null;
+    competitor_handle: string | null;
+    competitor_avatar: string | null;
+    tier: string;
+    channel_median: number;
+    multiplier: number;
+  }>;
+
+  const totalScanned = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM competitor_videos cv
+         JOIN competitors c ON c.id = cv.competitor_id
+         WHERE cv.published_at >= strftime('%s','now') - ? * 86400
+           AND (? IS NULL OR c.user_channel_id = ?)
+           AND c.tier IN (?, ?, ?, ?)`
+      )
+      .get(
+        opts.windowDays,
+        scope,
+        scope,
+        tierSlots[0],
+        tierSlots[1],
+        tierSlots[2],
+        tierSlots[3]
+      ) as { n: number }
+  ).n;
+
+  const competitorsCovered = (
+    db
+      .prepare(
+        `SELECT COUNT(DISTINCT id) AS n
+         FROM competitors
+         WHERE (? IS NULL OR user_channel_id = ?)
+           AND tier IN (?, ?, ?, ?)`
+      )
+      .get(scope, scope, tierSlots[0], tierSlots[1], tierSlots[2], tierSlots[3]) as {
+      n: number;
+    }
+  ).n;
+
+  return {
+    outliers: outliers.map((r) => ({
+      videoId: r.video_id,
+      title: r.title,
+      thumbnailUrl: r.thumbnail_url,
+      views: r.views,
+      publishedAt: r.published_at,
+      durationSeconds: r.duration_seconds,
+      competitorId: r.competitor_id,
+      competitorTitle: r.competitor_title,
+      competitorHandle: r.competitor_handle,
+      competitorAvatar: r.competitor_avatar,
+      tier: r.tier,
+      multiplier: Number(r.multiplier.toFixed(2)),
+      channelMedian: r.channel_median,
+    })),
+    totalScanned,
+    competitorsCovered,
+  };
+}
+
+/**
+ * Bulk-fetch competitor videos by ID for the /api/outliers/generate-ideas
+ * endpoint. Joins competitor metadata so the AI prompt has tier + name
+ * context per row. Filters out unknown ids silently.
+ */
+export function getCompetitorVideosByIds(
+  videoIds: string[]
+): Array<{
+  videoId: string;
+  title: string;
+  views: number;
+  publishedAt: number | null;
+  durationSeconds: number | null;
+  competitorId: number;
+  competitorTitle: string | null;
+  competitorHandle: string | null;
+  tier: string;
+  userChannelId: string | null;
+}> {
+  if (videoIds.length === 0) return [];
+  const placeholders = videoIds.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT cv.video_id, cv.title, cv.views, cv.published_at, cv.duration_seconds,
+              cv.competitor_id,
+              c.title       AS competitor_title,
+              c.handle      AS competitor_handle,
+              c.tier,
+              c.user_channel_id
+       FROM competitor_videos cv
+       JOIN competitors c ON c.id = cv.competitor_id
+       WHERE cv.video_id IN (${placeholders})`
+    )
+    .all(...videoIds) as Array<{
+    video_id: string;
+    title: string;
+    views: number;
+    published_at: number | null;
+    duration_seconds: number | null;
+    competitor_id: number;
+    competitor_title: string | null;
+    competitor_handle: string | null;
+    tier: string;
+    user_channel_id: string | null;
+  }>;
+  return rows.map((r) => ({
+    videoId: r.video_id,
+    title: r.title,
+    views: r.views,
+    publishedAt: r.published_at,
+    durationSeconds: r.duration_seconds,
+    competitorId: r.competitor_id,
+    competitorTitle: r.competitor_title,
+    competitorHandle: r.competitor_handle,
+    tier: r.tier,
+    userChannelId: r.user_channel_id,
+  }));
+}
+

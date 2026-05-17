@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import fs from "node:fs";
-import path from "node:path";
 import {
   getCommentAnalysis,
   getIntegration,
@@ -18,54 +16,13 @@ import {
   type ChannelAudienceBundle,
 } from "@/lib/yt-analytics";
 import { providerModelId } from "@/lib/ai-provider-types";
+import { extractSection, loadMentorMethod } from "@/lib/mentor-method";
 import { log } from "@/lib/logger";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const RATE_LIMIT_WINDOW_SEC = 5 * 60; // one analyze per channel per 5 min
-
-// MENTOR_METHOD.md sections are loaded from disk once per process. The
-// file is at the project root next to package.json — same lookup the DB
-// module uses. Cached on first read; the file is small and stable.
-let methodCache: string | null = null;
-function loadMentorMethod(): string {
-  if (methodCache !== null) return methodCache;
-  try {
-    // Walk up from cwd to find package.json, then read MENTOR_METHOD.md
-    // alongside it. Same posture as src/lib/db.ts's findProjectRoot.
-    let cur = process.cwd();
-    for (let i = 0; i < 8; i++) {
-      if (fs.existsSync(path.join(cur, "package.json"))) break;
-      const parent = path.dirname(cur);
-      if (parent === cur) break;
-      cur = parent;
-    }
-    const filePath = path.join(cur, "MENTOR_METHOD.md");
-    methodCache = fs.readFileSync(filePath, "utf8");
-  } catch {
-    methodCache = "";
-  }
-  return methodCache;
-}
-
-/**
- * Slice the methodology document down to specific sections by their
- * "## N. <title>" headers. Returns the section body without its own
- * header line. Falls back to empty string if the section isn't found —
- * the prompt still works, just with less context.
- */
-function extractSection(md: string, sectionNumber: number): string {
-  // Match "## <n>. " at the start of a line, capture until the next
-  // "## " heading or end of file.
-  const re = new RegExp(
-    `^##\\s+${sectionNumber}\\.\\s+[^\\n]*\\n([\\s\\S]*?)(?=^##\\s+\\d+\\.|\\Z)`,
-    "m"
-  );
-  const m = md.match(re);
-  if (!m) return "";
-  return m[1].trim();
-}
 
 const FIELD_VOCAB = ["niche", "positioning", "audience", "voice", "externalSources"] as const;
 type FieldKey = (typeof FIELD_VOCAB)[number];

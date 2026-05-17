@@ -13,6 +13,7 @@ import {
   Search,
   Users,
   BookOpen,
+  Flame,
 } from "lucide-react";
 import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
@@ -56,6 +57,7 @@ export function Sidebar() {
       icon: Search,
       badge: unreadAlerts,
     },
+    { href: "/outliers", label: "Outliers", icon: Flame, badge: 0 },
     { href: "/settings", label: t.nav.settings, icon: Settings, badge: 0 },
     {
       href: "/tutorial",
