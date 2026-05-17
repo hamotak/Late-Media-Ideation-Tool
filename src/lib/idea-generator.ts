@@ -45,6 +45,22 @@ const MIN_FORMAT_CANDIDATES = 2;
 // right tradeoff: better to return 3 strong ideas than 5 echoes.
 const MAX_RETRY_PASSES = 3;
 
+// Extended-thinking budget for the format×topic compose call. Sonnet 4.6
+// supports thinking natively. Ideation benefits more from reasoning than a
+// chat turn does (clustering outliers, picking the right format, composing
+// a novel title that survives the originality guard) — so the default is
+// fatter than the chat budget. Override via env if needed.
+const IDEATION_THINKING_BUDGET: number = (() => {
+  const raw = Number(process.env.ANTHROPIC_THINKING_BUDGET_IDEATION);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 6000;
+})();
+// Retries do less work (a handful of titles, not the whole slate) — half
+// budget keeps cost in check across up to MAX_RETRY_PASSES passes.
+const IDEATION_RETRY_THINKING_BUDGET = Math.max(
+  1024,
+  Math.floor(IDEATION_THINKING_BUDGET / 2)
+);
+
 import {
   performanceBandFor,
   type PerformanceBand,
@@ -298,10 +314,20 @@ export async function generateIdeasForChannel(opts: {
     const client = new Anthropic({ apiKey });
     const resp = await client.messages.create({
       model,
-      max_tokens: 3000,
-      temperature: 0.8,
+      // Bumped from 3000 → 8000 to accommodate the thinking budget below.
+      // Anthropic requires max_tokens > budget_tokens; we hold ~2k headroom
+      // for the actual ideas JSON output.
+      max_tokens: 8000,
+      // Extended thinking REQUIRES temperature=1 (the default). Setting
+      // any other value returns 400 "thinking.* requires temperature=1".
+      // We previously ran at 0.8 for tighter outputs; we trade that off
+      // for the reasoning quality thinking delivers.
       system: systemPrompt,
       messages: [{ role: "user", content: userBody }],
+      thinking: {
+        type: "enabled",
+        budget_tokens: IDEATION_THINKING_BUDGET,
+      },
     });
     const text = resp.content
       .filter((b) => b.type === "text")
@@ -397,10 +423,18 @@ export async function generateIdeasForChannel(opts: {
       const client = new Anthropic({ apiKey });
       const resp = await client.messages.create({
         model,
-        max_tokens: 1500,
-        temperature: 0.9, // bump temp for novelty on the retry
+        // Bumped from 1500 → 5000 to fit the retry thinking budget plus a
+        // few hundred tokens for the regenerated JSON. Temperature MUST be
+        // 1 (the default) when thinking is enabled — we previously ran at
+        // 0.9 for retry novelty; thinking compensates by reasoning through
+        // the remix instructions explicitly.
+        max_tokens: 5000,
         system: systemPrompt,
         messages: [{ role: "user", content: regenBody }],
+        thinking: {
+          type: "enabled",
+          budget_tokens: IDEATION_RETRY_THINKING_BUDGET,
+        },
       });
       const text = resp.content
         .filter((b) => b.type === "text")

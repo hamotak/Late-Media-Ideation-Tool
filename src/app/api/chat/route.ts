@@ -43,6 +43,17 @@ const MAX_TOOL_ITERATIONS = 12;
 // the model from burning iterations re-calling a broken tool.
 const TOOL_FAILURE_LOCK_AT = 2;
 
+// Extended thinking budget for the chat agent's Claude turns. Sonnet 4.6
+// supports thinking natively (no beta header). Hidden from the live chat
+// bubble — the SDK's `text` event doesn't fire on thinking deltas — but
+// the thinking blocks travel with each assistant message in history so
+// the multi-turn tool-use loop stays valid. Override via env if you want
+// a fatter / leaner budget; 0 (or any falsy value) disables thinking.
+const CHAT_THINKING_BUDGET: number = (() => {
+  const raw = Number(process.env.ANTHROPIC_THINKING_BUDGET_CHAT);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 4000;
+})();
+
 // Must mirror the ToolGroup union in chat-tools.ts. Missing entries cause
 // the route to silently drop those groups even when the UI sends them.
 const ALLOWED_GROUPS: ToolGroup[] = [
@@ -238,6 +249,9 @@ export async function POST(req: Request) {
             messages,
             tools,
             maxTokens: MAX_TOKENS,
+            // Thinking only applies to Claude; Gemini path ignores it.
+            thinkingBudget:
+              provider === "claude" ? CHAT_THINKING_BUDGET : undefined,
             onText: (text) => {
               iterText += text;
               send({ type: "delta", text });
@@ -385,6 +399,10 @@ export async function POST(req: Request) {
             messages,
             tools: [], // tools off for synthesis
             maxTokens: SYNTHESIS_MAX_TOKENS,
+            // Synthesis is exactly the case where reasoning pays — give
+            // the model the same budget as a regular iter.
+            thinkingBudget:
+              provider === "claude" ? CHAT_THINKING_BUDGET : undefined,
             onText: (text) => {
               synthText += text;
               send({ type: "delta", text });

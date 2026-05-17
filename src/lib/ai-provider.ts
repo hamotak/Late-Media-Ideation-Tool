@@ -86,6 +86,17 @@ export interface StreamTurnOpts {
   maxTokens: number;
   /** Called for every text delta — same shape both providers, raw text only. */
   onText: (delta: string) => void;
+  /**
+   * Anthropic extended thinking budget in tokens. When > 0 AND provider is
+   * "claude", enables thinking with the given budget (clamped server-side
+   * to maxTokens − 1024 so the API's `max_tokens > budget_tokens` rule
+   * always holds). Ignored on Gemini. Thinking deltas do NOT fire the
+   * `text` event on the SDK stream, so they stay hidden from the live
+   * chat bubble — but the resulting `thinking` blocks land in
+   * `final.content` and travel with the assistant turn in history,
+   * which Anthropic requires for tool-use round-trips.
+   */
+  thinkingBudget?: number;
 }
 
 /** Run one turn against the chosen provider, streaming text deltas live. */
@@ -106,12 +117,27 @@ async function runClaudeTurn(
   opts: StreamTurnOpts
 ): Promise<UnifiedTurnResult> {
   const client = new Anthropic({ apiKey: opts.apiKey });
+  // Anthropic requires max_tokens > budget_tokens. We reserve 1024 tokens
+  // of headroom for the actual text reply so an aggressive env override
+  // can't starve the answer. Sub-1024 budgets are dropped (no thinking).
+  const clampedThinking =
+    typeof opts.thinkingBudget === "number" && opts.thinkingBudget > 0
+      ? Math.min(opts.thinkingBudget, Math.max(0, opts.maxTokens - 1024))
+      : 0;
   const stream = client.messages.stream({
     model: providerModelId("claude"),
     max_tokens: opts.maxTokens,
     system: opts.system,
     messages: opts.messages,
     tools: opts.tools.length ? opts.tools : undefined,
+    ...(clampedThinking >= 1024
+      ? {
+          thinking: {
+            type: "enabled" as const,
+            budget_tokens: clampedThinking,
+          },
+        }
+      : {}),
   });
 
   stream.on("text", (text) => opts.onText(text));
