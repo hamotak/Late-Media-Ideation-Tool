@@ -27,13 +27,13 @@ export default function TutorialPage() {
             </a>
           </li>
           <li>
-            <a href="#pages" className="text-primary hover:underline">
-              Every page, in plain words
+            <a href="#methodology" className="text-primary hover:underline">
+              The methodology
             </a>
           </li>
           <li>
-            <a href="#methodology" className="text-primary hover:underline">
-              The methodology
+            <a href="#coming-soon" className="text-primary hover:underline">
+              Coming soon
             </a>
           </li>
           <li>
@@ -87,134 +87,32 @@ export default function TutorialPage() {
             Adjacent, or Far.
           </li>
           <li>
-            <ComingSoon /> Open <strong>Outliers</strong> → see which competitor
-            videos broke out 2× or more above their own channel&apos;s median.
+            Open{" "}
+            <Link href="/outliers" className="text-primary hover:underline">
+              Outliers
+            </Link>{" "}
+            → competitor videos that beat their own channel&apos;s median by
+            2× or more. Library tab + Patterns tab (auto-extracted title
+            format library).
           </li>
           <li>
-            <ComingSoon /> Open <strong>Topic Ideation</strong> → generate 10
-            video ideas built from your context + outliers + saved styles.
+            Open{" "}
+            <Link href="/chat" className="text-primary hover:underline">
+              AI Chat
+            </Link>{" "}
+            → ask the agent &ldquo;Generate 5 ideas from my current outliers&rdquo;
+            or &ldquo;Find topic gaps.&rdquo; This is the central ideation
+            surface — every methodology lens lives here.
           </li>
         </ol>
-      </Section>
-
-      <Section id="pages" title="Every page, in plain words">
-        <div className="space-y-5">
-          <PageDescription name="Dashboard" href="/" status="active">
-            Overview of every channel you&apos;ve connected: revenue, views,
-            top performers. Use the channel picker top-right to switch focus.
-          </PageDescription>
-
-          <PageDescription name="Channel Info" href="/channel-info" status="active">
-            Where you describe each channel to the AI — niche, positioning,
-            audience, voice, off-YouTube research sources — and where the
-            per-channel detail view lives (themes, transcripts coverage,
-            audience, revenue). One channel selected → full detail card.
-            &ldquo;All channels&rdquo; selected → summary table with a
-            &ldquo;Context filled&rdquo; / &ldquo;Needs context&rdquo;
-            status per channel. The &ldquo;Analyze with AI&rdquo; button
-            asks Claude to propose all 5 context fields from your recent
-            videos and transcripts. Every AI feature in the app reads
-            from this — fill it in carefully.
-          </PageDescription>
-
-          <PageDescription name="Videos" href="/videos" status="active">
-            Every video from your channels with transcript, AI analysis, and
-            comments. Click one to drill in.
-          </PageDescription>
-
-          <PageDescription name="AI Chat" href="/chat" status="active">
-            Your central ideation agent. Talk to it about your channel, ask
-            for video ideas, ask why a competitor&apos;s video blew up, find
-            topic gaps. It reads your channel context, competitors, outliers,
-            format patterns, your videos, transcripts, comment analysis.
-            Follows the methodology in <code className="rounded bg-muted px-1 py-0.5 text-[10px]">MENTOR_METHOD.md</code>.
-          </PageDescription>
-
-          <PageDescription
-            name="Competitors"
-            href="/competitors"
-            status="active"
-          >
-            Tracked competitors of each of your channels. Each one is tagged as
-            Authority (established, large), Breakthrough (newer, blowing up —
-            more predictive), Adjacent (related niche, light overlap), or Far
-            (unrelated audience, best source for thumbnail formats).
-          </PageDescription>
-
-          <PageDescription name="Alerts" href="/settings/alerts" status="active">
-            Rules that ping you when something happens — e.g. a competitor
-            uploads, a video crosses a view threshold.
-          </PageDescription>
-
-          <PageDescription
-            name="Integrations"
-            href="/settings/integrations"
-            status="active"
-          >
-            Your API keys for Claude, YouTube Data, Deepgram, Apify, and
-            others. One-time setup.
-          </PageDescription>
-
-          <PageDescription name="Import" href="/settings/import" status="active">
-            Bulk-import data from CSV. Useful when migrating from another tool.
-          </PageDescription>
-
-          <PageDescription name="Logs" href="/settings/logs" status="active">
-            Every API call, error, and event in chronological order. Look here
-            if something feels broken.
-          </PageDescription>
-
-          <PageDescription name="Settings" href="/settings" status="active">
-            App preferences.
-          </PageDescription>
-
-          <PageDescription name="Outliers" href="/outliers" status="active">
-            Two tabs. <strong>Library</strong> shows competitor videos that
-            beat their own channel&apos;s median by 2×+ (60-day window). Click any card →
-            Claude tags it with &ldquo;what made it work&rdquo; levers
-            (curiosity, nostalgia, counterintuitive, etc.) plus 2-3 sentences
-            of reasoning. <strong>Patterns</strong> extracts title format
-            templates from those outliers (like &ldquo;[Place]&apos;s most
-            [Adjective] [Thing]&rdquo;) so you see WHAT is structurally
-            working in the niche right now. To turn outliers into ideas, ask
-            the AI Chat.
-          </PageDescription>
-
-          <PageDescription name="Styles Library" status="coming-soon">
-            Your collected title formats and thumbnail formats, tagged by source
-            niche tier. The building blocks Topic Ideation uses to generate new
-            ideas.
-          </PageDescription>
-
-          <PageDescription name="Topic Validator" status="coming-soon">
-            Paste a topic, the app checks how many different channels covered
-            it and across what time periods. Auto-flags traps: single-channel
-            only, event-spike, pre-2020 boost, evergreen-confirmed.
-          </PageDescription>
-
-          <PageDescription name="Daily Market Watch" status="coming-soon">
-            Runs every morning. Reports new outliers, emerging title
-            structures, new competitors blowing up, and topic conflicts (a
-            competitor uploaded something you had planned).
-          </PageDescription>
-
-          <PageDescription name="Topic Ideation" status="coming-soon">
-            The synthesizer. Pick a channel → Claude generates 10 video ideas
-            using your channel context + recent outliers + saved title /
-            thumbnail formats. Approve, edit, or trash each one. Available now
-            in AI Chat — full standalone page comes later.
-          </PageDescription>
-        </div>
       </Section>
 
       <Section id="methodology" title="The methodology">
         <ul className="space-y-2 pl-5">
           <li className="list-disc">
             <strong>Outliers are relative.</strong> A video is an outlier if it
-            beats its own channel&apos;s median by 2× or more (the in-app default;
-            the canonical methodology in MENTOR_METHOD.md §2 keeps 3× as the
-            strict definition) — not because it crossed some absolute view
-            threshold.
+            beats its own channel&apos;s median by 2× or more (60-day window) —
+            not because it crossed some absolute view threshold.
           </li>
           <li className="list-disc">
             <strong>Validate topics across channels and time.</strong> A single
@@ -240,6 +138,23 @@ export default function TutorialPage() {
         <p className="mt-4 text-xs text-muted-foreground">
           Full methodology in <code className="rounded bg-muted px-1 py-0.5">MENTOR_METHOD.md</code> at the project root.
         </p>
+      </Section>
+
+      <Section id="coming-soon" title="Coming soon">
+        <ul className="space-y-3 pl-5">
+          <li className="list-disc">
+            <strong>Topic Validator.</strong> Paste a topic, the app checks how
+            many different channels covered it and across what time periods.
+            Auto-flags traps: single-channel only, event-spike, pre-2020 boost,
+            evergreen-confirmed.
+          </li>
+          <li className="list-disc">
+            <strong>Daily Market Watch.</strong> Runs every morning. Reports
+            new outliers, emerging title structures, new competitors blowing
+            up, and topic conflicts (a competitor uploaded something you had
+            planned).
+          </li>
+        </ul>
       </Section>
 
       <Section id="troubleshooting" title="Troubleshooting">
@@ -296,62 +211,5 @@ function Section({
         {children}
       </div>
     </section>
-  );
-}
-
-function PageDescription({
-  name,
-  href,
-  status,
-  children,
-}: {
-  name: string;
-  href?: string;
-  status: "active" | "coming-soon";
-  children: React.ReactNode;
-}) {
-  return (
-    <div>
-      <div className="mb-1 flex items-center gap-2">
-        {href ? (
-          <Link
-            href={href}
-            className="text-base font-medium text-primary hover:underline"
-          >
-            {name}
-          </Link>
-        ) : (
-          <span className="text-base font-medium text-foreground/90">
-            {name}
-          </span>
-        )}
-        {status === "active" ? <ActivePill /> : <ComingSoonPill />}
-      </div>
-      <p className="text-sm text-muted-foreground">{children}</p>
-    </div>
-  );
-}
-
-function ActivePill() {
-  return (
-    <span className="inline-flex items-center rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
-      Currently active
-    </span>
-  );
-}
-
-function ComingSoonPill() {
-  return (
-    <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-      Coming soon
-    </span>
-  );
-}
-
-function ComingSoon() {
-  return (
-    <span className="mr-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-      Coming soon
-    </span>
   );
 }

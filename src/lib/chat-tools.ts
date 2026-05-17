@@ -446,7 +446,7 @@ const STRATEGY_TOOLS: Tool[] = [
   {
     name: "list_outliers",
     description:
-      "List the active channel's competitor outliers — competitor videos that beat their own channel's 60-day median by 2× or more (in-app default; MENTOR_METHOD §2 canonical is 3×). Sorted by multiplier DESC. Always scoped to the active channel; no window/multiplier/tier filters here — that nuance lives on the /outliers page UI. Returns: { outliers: [{ videoId, title, thumbnailUrl, views, multiplier, channelMedian, publishedAt, competitorTitle, tier }] }.",
+      "List the active channel's competitor outliers — competitor videos that beat their own channel's 60-day median by 2× or more (per MENTOR_METHOD §2). Sorted by multiplier DESC. Always scoped to the active channel; no window/multiplier/tier filters here — that nuance lives on the /outliers page UI. Returns: { outliers: [{ videoId, title, thumbnailUrl, views, multiplier, channelMedian, publishedAt, competitorTitle, tier }] }.",
     input_schema: {
       type: "object",
       properties: {

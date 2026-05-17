@@ -68,6 +68,21 @@ export function Sidebar() {
     },
   ];
 
+  // Sub-items of /settings — surfaced as indented links under Settings
+  // whenever the user is on any /settings route. Before this, Logs / Alerts
+  // / Import were only reachable by clicking Settings AND noticing the
+  // tab strip above the Preferences card. Alerts is the only place to wire
+  // Telegram — un-discoverable was a real usability bug.
+  const settingsSubItems: { href: string; label: string }[] = [
+    { href: "/settings", label: "Preferences" },
+    { href: "/settings/integrations", label: "Integrations" },
+    { href: "/settings/import", label: "Import" },
+    { href: "/settings/logs", label: "Logs" },
+    { href: "/settings/alerts", label: "Alerts" },
+  ];
+  const isOnSettings =
+    pathname === "/settings" || pathname.startsWith("/settings/");
+
   return (
     <aside className="flex h-screen w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
       <div className="flex items-center gap-2 px-5 py-5">
@@ -114,6 +129,34 @@ export function Sidebar() {
                       </span>
                     )}
                   </Link>
+                  {/* Settings sub-items — only render when the user is on a
+                      /settings route, so the sidebar stays compact elsewhere. */}
+                  {item.href === "/settings" && isOnSettings && (
+                    <ul className="ml-7 mt-1 space-y-0.5">
+                      {settingsSubItems.map((sub) => {
+                        const subActive =
+                          sub.href === "/settings"
+                            ? pathname === "/settings"
+                            : pathname === sub.href ||
+                              pathname.startsWith(sub.href + "/");
+                        return (
+                          <li key={sub.href}>
+                            <Link
+                              href={sub.href}
+                              className={cn(
+                                "block rounded-md px-2 py-1 text-xs transition-colors",
+                                subActive
+                                  ? "bg-primary/10 text-primary font-medium"
+                                  : "text-sidebar-foreground/70 hover:bg-accent hover:text-accent-foreground"
+                              )}
+                            >
+                              {sub.label}
+                            </Link>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
                 </li>
               </Fragment>
             );

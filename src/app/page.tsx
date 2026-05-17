@@ -2,15 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import {
-  Users,
-  Eye,
-  Video,
-  TrendingUp,
-  Upload,
-  ArrowUpRight,
-  RefreshCw,
-} from "lucide-react";
+import { Upload, ArrowUpRight, RefreshCw } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -23,18 +15,20 @@ import { useI18n } from "@/lib/i18n/provider";
 import { ConnectBanner } from "@/components/connect-banner";
 import { StudioOverview } from "@/components/studio-overview";
 import { TodaysEarnings } from "@/components/todays-earnings";
-import { ViewsOverTime } from "@/components/views-over-time";
 import { TagsOverview } from "@/components/tags-overview";
 import { SingleChannelEarnings } from "@/components/single-channel-earnings";
 import { AllChannelsOverview } from "@/components/all-channels-overview";
 import { cn } from "@/lib/utils";
 
+// Subset of `/api/dashboard` response that survives after the dedupe pass —
+// only `total` is still consumed (the `hasData` check). The 4-KPI strip
+// that read totalViews / avgViews lived above StudioOverview and was cut
+// because StudioOverview already renders period-windowed Views + Subs +
+// Watch time + Avg view duration. Subs/Views/Videos/AvgViews were the
+// channel-LIFETIME variants — two strips on one page, no labelling for
+// "lifetime vs period", users couldn't reconcile the numbers.
 type Stats = {
   total: number;
-  totalViews: number;
-  totalLikes: number;
-  totalComments: number;
-  avgViews: number;
 };
 
 type Channel = {
@@ -44,13 +38,6 @@ type Channel = {
   view_count: number | null;
   video_count: number | null;
 };
-
-function fmt(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "—";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
-  return n.toLocaleString();
-}
 
 export default function DashboardPage() {
   const { t } = useI18n();
@@ -100,29 +87,6 @@ export default function DashboardPage() {
   }, []);
 
   const hasData = (stats?.total ?? 0) > 0;
-
-  const kpis = [
-    {
-      label: t.dashboard.kpi.subscribers,
-      value: fmt(channel?.subscriber_count ?? null),
-      icon: Users,
-    },
-    {
-      label: t.dashboard.kpi.views,
-      value: fmt(stats?.totalViews ?? (channel?.view_count ?? null)),
-      icon: Eye,
-    },
-    {
-      label: t.dashboard.kpi.videos,
-      value: fmt(stats?.total ?? null),
-      icon: Video,
-    },
-    {
-      label: t.dashboard.kpi.avgViews,
-      value: fmt(stats?.avgViews ?? null),
-      icon: TrendingUp,
-    },
-  ];
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -187,33 +151,11 @@ export default function DashboardPage() {
             key={`sce-${channel.id}-${refreshKey}`}
             channelTitle={channel.title ?? "This channel"}
           />
-          <ViewsOverTime key={`vo-${refreshKey}`} />
           <TodaysEarnings key={`te-${refreshKey}`} />
         </>
       )}
 
       {viewMode === "channel" && channel && <StudioOverview key={`so-${refreshKey}`} />}
-
-      {viewMode === "channel" && (
-        <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {kpis.map((k) => {
-            const Icon = k.icon;
-            return (
-              <Card key={k.label}>
-                <CardContent className="flex items-center gap-4 p-5">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 text-primary">
-                    <Icon className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <div className="text-xs text-muted-foreground">{k.label}</div>
-                    <div className="text-xl font-semibold">{k.value}</div>
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-      )}
 
       {viewMode === "channel" && !hasData && (
         <Card>

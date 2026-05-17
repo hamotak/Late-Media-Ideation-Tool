@@ -20,7 +20,7 @@ export const runtime = "nodejs";
  * Optional overrides preserved for legacy callers (chat tools that want
  * a tighter window/multiplier) — pass `?window=` / `?minMultiplier=` /
  * `?tiers=` to opt in. Default behaviour: 60d window, 2× multiplier,
- * all tiers (in-app default; MENTOR_METHOD §2 canonical is 3×).
+ * all tiers (per MENTOR_METHOD §2).
  */
 export async function GET(req: Request) {
   const url = new URL(req.url);

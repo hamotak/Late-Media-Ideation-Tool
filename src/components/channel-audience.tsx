@@ -111,7 +111,7 @@ function deviceIcon(d: string): React.ComponentType<{ className?: string }> {
  * watch on, how they got there. Lives on /channel as its own card. All
  * four sub-reports come back in one /api/analytics/audience round-trip.
  */
-export function ChannelAudience() {
+export function ChannelAudience({ channelId }: { channelId?: string } = {}) {
   const [period, setPeriod] = useState<string>("28d");
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -122,6 +122,11 @@ export function ChannelAudience() {
       try {
         const url = new URL("/api/analytics/audience", window.location.origin);
         url.searchParams.set("period", period);
+        // When mounted under /channel-info?focus=X the caller passes the
+        // focused channelId so the API scopes to that channel — otherwise
+        // we'd render the server-side ACTIVE channel's audience under a
+        // header card showing the focused channel's name. Cross-channel leak.
+        if (channelId) url.searchParams.set("channelId", channelId);
         if (force) url.searchParams.set("nocache", "1");
         const res = await fetch(url.toString());
         const d = (await res.json()) as Payload;
@@ -132,7 +137,7 @@ export function ChannelAudience() {
         setLoading(false);
       }
     },
-    [period]
+    [period, channelId]
   );
 
   useEffect(() => {

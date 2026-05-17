@@ -117,9 +117,8 @@ export async function competitorTopicsGap(opts: {
     };
   }
 
-  // Competitor outliers — last 60 days, ≥2× their median (in-app default),
-  // all tiers. MENTOR_METHOD §2 canonical is 3×; we use 2× to widen the
-  // pool of source signals before AI grouping.
+  // Competitor outliers — last 60 days, ≥2× their median, all tiers
+  // (per MENTOR_METHOD §2).
   const { outliers } = outliersForUserChannel({
     userChannelId,
     windowDays: 60,

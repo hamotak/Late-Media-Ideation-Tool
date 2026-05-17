@@ -28,7 +28,16 @@ type Payload = {
 };
 
 export async function GET(req: Request) {
-  const tokens = getOAuthTokens();
+  const url = new URL(req.url);
+  // Caller can override the active-channel scope via ?channelId=X. Used by
+  // /channel-info?focus=X so the audience matches the row the user clicked,
+  // not whatever channel is globally active. Omit → falls back to active.
+  const requestedChannelId = url.searchParams.get("channelId");
+  const activeChannelId =
+    getSetting("youtube.activeChannelId") || getSetting("youtube.channelId");
+  const scopedChannelId = requestedChannelId || activeChannelId;
+
+  const tokens = getOAuthTokens(scopedChannelId);
   if (!tokens?.refresh_token) {
     return NextResponse.json({
       connected: false,
@@ -37,7 +46,6 @@ export async function GET(req: Request) {
     } satisfies Payload);
   }
 
-  const url = new URL(req.url);
   const periodKey = url.searchParams.get("period") ?? "28d";
   const periodSpec = PERIODS[periodKey];
   if (periodSpec === undefined) {
@@ -47,16 +55,20 @@ export async function GET(req: Request) {
     );
   }
 
-  // Channel id in cache key prevents stale data leaking across rebinds.
-  const channelId = getSetting("youtube.channelId") ?? "no-channel";
-  const cacheKey = `analytics.audience.${channelId}.${periodKey}`;
+  // Channel id in cache key prevents stale data leaking across rebinds —
+  // AND across multiple focused channels viewed in the same session.
+  const cacheChannelId = scopedChannelId ?? "no-channel";
+  const cacheKey = `analytics.audience.${cacheChannelId}.${periodKey}`;
   if (url.searchParams.get("nocache") !== "1") {
     const cached = getCached<Payload>(cacheKey);
     if (cached) return NextResponse.json(cached);
   }
 
   try {
-    const audience = await fetchChannelAudience(periodSpec);
+    const audience = await fetchChannelAudience(
+      periodSpec,
+      scopedChannelId ?? undefined
+    );
     const payload: Payload = { connected: true, period: periodKey, audience };
     setCached(cacheKey, payload, CACHE_TTL_SEC);
     return NextResponse.json(payload);

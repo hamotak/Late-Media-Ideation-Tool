@@ -82,7 +82,7 @@ function fmtNum(n: number): string {
  * The `revenueAccess` flag is set sticky on the server when a 403 hits
  * the monetary endpoint, so we don't keep re-trying every page load.
  */
-export function ChannelRevenue() {
+export function ChannelRevenue({ channelId }: { channelId?: string } = {}) {
   const [period, setPeriod] = useState<string>("28d");
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -93,6 +93,9 @@ export function ChannelRevenue() {
       try {
         const url = new URL("/api/analytics/revenue", window.location.origin);
         url.searchParams.set("period", period);
+        // See ChannelAudience for why channelId override matters — fixes
+        // the cross-channel data leak on /channel-info?focus=X.
+        if (channelId) url.searchParams.set("channelId", channelId);
         if (force) {
           url.searchParams.set("nocache", "1");
           url.searchParams.set("force", "1");
@@ -106,7 +109,7 @@ export function ChannelRevenue() {
         setLoading(false);
       }
     },
-    [period]
+    [period, channelId]
   );
 
   useEffect(() => {

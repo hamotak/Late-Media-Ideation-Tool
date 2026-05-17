@@ -452,8 +452,8 @@ function SingleChannelCard({
       <SectionDivider label="Channel details" />
       <AboutCard channel={detailChannel} />
       <MetaCard channel={detailChannel} />
-      <ChannelAudience />
-      <ChannelRevenue />
+      <ChannelAudience channelId={channel.channelId} />
+      <ChannelRevenue channelId={channel.channelId} />
       {analytics && <ThemesCard analytics={analytics} />}
       {analytics && <TranscriptsCoverageCard analytics={analytics} />}
 

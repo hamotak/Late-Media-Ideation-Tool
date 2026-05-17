@@ -33,11 +33,16 @@ type Payload = {
 };
 
 export async function GET(req: Request) {
-  // Active channel decides which OAuth slot we read tokens from.
-  // Per-channel slot first; fall back to global slot for installs that
-  // pre-date multi-account support.
-  const activeChannelId = getSetting("youtube.activeChannelId") || getSetting("youtube.channelId");
-  const tokens = getOAuthTokens(activeChannelId);
+  const url = new URL(req.url);
+  // Caller can override the active-channel scope via ?channelId=X. Used
+  // by /channel-info?focus=X so the revenue card matches the focused
+  // row, not the globally-active channel. Omit → falls back to active.
+  const requestedChannelId = url.searchParams.get("channelId");
+  const activeChannelId =
+    getSetting("youtube.activeChannelId") || getSetting("youtube.channelId");
+  const scopedChannelId = requestedChannelId || activeChannelId;
+
+  const tokens = getOAuthTokens(scopedChannelId);
   if (!tokens?.refresh_token) {
     return NextResponse.json({
       connected: false,
@@ -47,7 +52,6 @@ export async function GET(req: Request) {
     } satisfies Payload);
   }
 
-  const url = new URL(req.url);
   const periodKey = url.searchParams.get("period") ?? "28d";
   const periodSpec = PERIODS[periodKey];
   if (periodSpec === undefined) {
@@ -60,7 +64,7 @@ export async function GET(req: Request) {
   // Per-channel revenueAccess flag — channel A being denied no longer
   // taints channel B (the bug the user reported).
   if (
-    getRevenueAccessFlag(activeChannelId ?? undefined) === "denied" &&
+    getRevenueAccessFlag(scopedChannelId ?? undefined) === "denied" &&
     url.searchParams.get("force") !== "1"
   ) {
     return NextResponse.json({
@@ -71,25 +75,25 @@ export async function GET(req: Request) {
     } satisfies Payload);
   }
 
-  // Channel id in cache key — same reasoning as overview/audience.
-  const channelId = getSetting("youtube.channelId") ?? "no-channel";
+  // Cache key carries the scoped channel id — same reasoning as audience.
+  const cacheChannelId = scopedChannelId ?? "no-channel";
   // v2: payload shape changed when topVideos started carrying title +
   // thumbnail + locally-overridden views. Old v1 cache entries would
   // render as `{ title: undefined }` rows — bumping the version forces
   // a refetch on the next call after deploy.
-  const cacheKey = `analytics.revenue.v2.${channelId}.${periodKey}`;
+  const cacheKey = `analytics.revenue.v2.${cacheChannelId}.${periodKey}`;
   if (url.searchParams.get("nocache") !== "1") {
     const cached = getCached<Payload>(cacheKey);
     if (cached) return NextResponse.json(cached);
   }
 
   try {
-    // Pass channelId explicitly so runReport picks the matching
+    // Pass scopedChannelId explicitly so runReport picks the matching
     // per-channel OAuth tokens (different Google account per channel
     // is supported via `google.oauth.tokens.<channelId>`).
     const revenue = await fetchChannelRevenue(
       periodSpec,
-      channelId !== "no-channel" ? channelId : undefined
+      scopedChannelId ?? undefined
     );
     // YT Analytics often returns 0 views for monetary top-earners (the
     // monetary report and the public-stats report are computed off
@@ -129,7 +133,7 @@ export async function GET(req: Request) {
           connected: true,
           revenueAccess: denied
             ? "denied"
-            : getRevenueAccessFlag(activeChannelId ?? undefined),
+            : getRevenueAccessFlag(scopedChannelId ?? undefined),
           period: periodKey,
           revenue: null,
           error: err.message,

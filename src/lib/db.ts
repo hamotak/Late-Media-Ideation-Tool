@@ -3206,13 +3206,8 @@ export function listCompetitorVideos(
 /**
  * Per-competitor metrics computed for the card UI:
  *  - `outliers60d`     count of videos where views > 2 × the channel's own
- *                      60-day median. 0 when the 60d window has fewer than
- *                      5 videos (sample too small). Window was widened
- *                      from 30d to 60d, and the threshold was lowered from
- *                      3× to 2×, both after testing on real data. The
- *                      canonical methodology in MENTOR_METHOD.md §2 keeps
- *                      3× as the strict definition; 2× is the in-app
- *                      default for surfacing signals on calmer channels.
+ *                      60-day median (per MENTOR_METHOD §2). 0 when the
+ *                      window has fewer than 5 videos (sample too small).
  *  - `medianViews60d`  the 60-day median itself (null when <5 videos).
  *  - `lastUploadAt`    MAX(published_at) across all videos for this
  *                      competitor (null when no videos).

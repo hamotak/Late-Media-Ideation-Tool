@@ -88,6 +88,9 @@ type Alert = {
 type AlertSort = "outlier" | "newest" | "views";
 type AlertWindow = "all" | "7d" | "28d" | "90d";
 
+const ALERTS_MIN_MULT_STOPS = [1, 1.5, 2, 3, 5, 10] as const;
+const ALERTS_MIN_MULT_KEY = "alerts.min_multiplier";
+
 type TopicGap = {
   topic: string;
   reason: string;
@@ -149,6 +152,21 @@ export default function CompetitorsPage() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertSort, setAlertSort] = useState<AlertSort>("outlier");
   const [alertWindow, setAlertWindow] = useState<AlertWindow>("all");
+  // Per-browser persistence of the Alerts tab's min-multiplier filter.
+  // Initialised from localStorage on mount; sanity-checked back to 2 if
+  // the persisted value is NaN / outside the stop range.
+  const [alertMinMult, setAlertMinMult] = useState<number>(2);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(ALERTS_MIN_MULT_KEY);
+    if (!raw) return;
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 1) setAlertMinMult(parsed);
+  }, []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(ALERTS_MIN_MULT_KEY, String(alertMinMult));
+  }, [alertMinMult]);
   const [unread, setUnread] = useState(0);
   const [inFlight, setInFlight] = useState(0);
   const [tab, setTab] = useState<Tab>("overview");
@@ -765,8 +783,10 @@ export default function CompetitorsPage() {
               alerts={alerts}
               sort={alertSort}
               window={alertWindow}
+              minMult={alertMinMult}
               onSortChange={setAlertSort}
               onWindowChange={setAlertWindow}
+              onMinMultChange={setAlertMinMult}
               onMarkRead={markAlertRead}
             />
           </CardContent>
@@ -842,26 +862,39 @@ function AlertsView({
   alerts,
   sort,
   window,
+  minMult,
   onSortChange,
   onWindowChange,
+  onMinMultChange,
   onMarkRead,
 }: {
   alerts: Alert[];
   sort: AlertSort;
   window: AlertWindow;
+  minMult: number;
   onSortChange: (s: AlertSort) => void;
   onWindowChange: (w: AlertWindow) => void;
+  onMinMultChange: (m: number) => void;
   onMarkRead: (id: number) => void;
 }) {
   // Filter by upload-date window (falls back to detected_at when the
-  // competitor_videos row was wiped) → then sort by the chosen key.
+  // competitor_videos row was wiped) AND by min outlier multiplier
+  // (persisted per browser), then sort by the chosen key.
   const now = Math.floor(Date.now() / 1000);
   const windowSec =
     window === "7d" ? 7 * 86400 : window === "28d" ? 28 * 86400 : window === "90d" ? 90 * 86400 : null;
   const filtered = alerts.filter((a) => {
-    if (windowSec === null) return true;
-    const t = a.published_at ?? a.detected_at;
-    return now - t <= windowSec;
+    if (windowSec !== null) {
+      const t = a.published_at ?? a.detected_at;
+      if (now - t > windowSec) return false;
+    }
+    // Alerts without a multiplier slip through the min filter at 1× and
+    // get dropped at anything higher — they're usually historical rows
+    // from before the multiplier was tracked, so this is fine.
+    if (minMult > 1) {
+      if (a.multiplier === null || a.multiplier < minMult) return false;
+    }
+    return true;
   });
   const sorted = [...filtered].sort((a, b) => {
     if (sort === "newest") {
@@ -876,51 +909,73 @@ function AlertsView({
 
   return (
     <>
-      {/* Filter row */}
-      <div className="mb-3 flex flex-wrap items-center gap-3 border-b border-border/60 pb-3 text-xs">
-        <label className="inline-flex items-center gap-1.5 text-muted-foreground">
-          <span>Sort:</span>
-          <select
-            value={sort}
-            onChange={(e) => onSortChange(e.target.value as AlertSort)}
-            className="rounded-md border border-input bg-background px-2 py-1 text-xs"
-          >
-            <option value="outlier">Highest outlier score</option>
-            <option value="newest">Newest upload</option>
-            <option value="views">Most views</option>
-          </select>
-        </label>
-        <div className="inline-flex items-center gap-1.5">
-          <span className="text-muted-foreground">Window:</span>
-          {(["all", "7d", "28d", "90d"] as const).map((w) => (
+      {/* Filter row — two lines so narrow viewports don't have to overflow.
+          Sort + Window stay on line 1 with the counter; Min outlier sits
+          alone on line 2 since the pill row is wider. */}
+      <div className="mb-3 space-y-2 border-b border-border/60 pb-3 text-xs">
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="inline-flex items-center gap-1.5 text-muted-foreground">
+            <span>Sort:</span>
+            <select
+              value={sort}
+              onChange={(e) => onSortChange(e.target.value as AlertSort)}
+              className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+            >
+              <option value="outlier">Highest outlier score</option>
+              <option value="newest">Newest upload</option>
+              <option value="views">Most views</option>
+            </select>
+          </label>
+          <div className="inline-flex items-center gap-1.5">
+            <span className="text-muted-foreground">Window:</span>
+            {(["all", "7d", "28d", "90d"] as const).map((w) => (
+              <button
+                key={w}
+                type="button"
+                onClick={() => onWindowChange(w)}
+                className={cn(
+                  "rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors",
+                  window === w
+                    ? "bg-primary/15 text-primary"
+                    : "border border-border text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {w === "all" ? "All" : w}
+              </button>
+            ))}
+          </div>
+          <span className="ml-auto text-[11px] text-muted-foreground">
+            {sorted.length} alert{sorted.length === 1 ? "" : "s"} shown
+            {sorted.length !== alerts.length && (
+              <span className="text-muted-foreground/60"> (of {alerts.length})</span>
+            )}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-muted-foreground">Min outlier:</span>
+          {ALERTS_MIN_MULT_STOPS.map((v) => (
             <button
-              key={w}
+              key={v}
               type="button"
-              onClick={() => onWindowChange(w)}
+              onClick={() => onMinMultChange(v)}
               className={cn(
                 "rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors",
-                window === w
+                minMult === v
                   ? "bg-primary/15 text-primary"
                   : "border border-border text-muted-foreground hover:text-foreground"
               )}
             >
-              {w === "all" ? "All" : w}
+              {v === 1 ? "1×" : `${v}×`}
             </button>
           ))}
         </div>
-        <span className="ml-auto text-[11px] text-muted-foreground">
-          {sorted.length} alert{sorted.length === 1 ? "" : "s"} shown
-          {sorted.length !== alerts.length && (
-            <span className="text-muted-foreground/60"> (of {alerts.length})</span>
-          )}
-        </span>
       </div>
 
       {sorted.length === 0 ? (
         <div className="py-12 text-center text-sm text-muted-foreground">
           {alerts.length === 0
             ? "No viral alerts yet. They appear automatically when a tracked competitor's video crosses 2× their median views."
-            : "No alerts match this window. Try widening to All."}
+            : "No alerts match these filters. Try widening the window or lowering the min outlier."}
         </div>
       ) : (
         <ul className="space-y-2">
@@ -1156,7 +1211,10 @@ function CompetitorCard({
           )}
 
           {!isWorking && !isFailed && (
-            <div className="mt-3 grid grid-cols-4 gap-2 text-center text-xs">
+            // Outliers 60d cell moved to the detail-page header only — too
+            // dense on the list card alongside similarity %, and the user
+            // already drills in for outlier-level work.
+            <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
               <CardMetric
                 label="Subs"
                 value={fmtCount(competitor.subscriberCount)}
@@ -1164,11 +1222,6 @@ function CompetitorCard({
               <ViewsTrackedCell
                 totalViews={competitor.totalViews}
                 totalVideos={competitor.totalVideos}
-              />
-              <CardMetric
-                label="Outliers 60d"
-                value={String(competitor.outliers60d)}
-                highlight={competitor.outliers60d > 0}
               />
               <CardMetric
                 label="Last upload"

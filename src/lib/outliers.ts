@@ -13,9 +13,7 @@ import {
  *   - list_outliers chat tool (the central ideation agent in /chat)
  *
  * Defaults to the unfiltered view: scope to the active channel, last
- * 60-day window, all tiers, multiplier ≥ 2 (in-app default — the strict
- * MENTOR_METHOD §2 canonical is 3×, but 2× is what the app uses for
- * surfacing signals on calmer channels where 3× under-surfaces). The
+ * 60-day window, all tiers, multiplier ≥ 2 (per MENTOR_METHOD §2). The
  * underlying SQL helper in db.ts already enforces "needs ≥ 5 videos in
  * the window" for statistical sanity.
  *

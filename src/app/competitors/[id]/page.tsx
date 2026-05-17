@@ -552,12 +552,10 @@ export default function CompetitorDetailPage({
           </p>
           <p>
             The median is computed over the last <strong>60 days</strong> of
-            uploads, and the app default threshold is <strong>≥ 2×</strong> the
-            median. (MENTOR_METHOD §2 keeps 3× as the strict canonical
-            definition; 2× is what the app uses by default because 3× under-
-            surfaces signals on calmer, consistent channels.) We need at least
-            5 videos in the window before showing any outliers — otherwise
-            the sample is too small to be meaningful.
+            uploads, and the threshold is <strong>≥ 2×</strong> the median
+            (per MENTOR_METHOD §2). We need at least 5 videos in the window
+            before showing any outliers — otherwise the sample is too small
+            to be meaningful.
           </p>
           <p>
             Click any outlier to open it on YouTube. Use the AI Chat to ask
