@@ -36,13 +36,11 @@ type Competitor = {
   syncError: string | null;
   similarityScore: number | null;
   outliers60d: number;
-  outliers60d2x: number;
   medianViews60d: number | null;
   lastUploadAt: number | null;
   recentVideoViews: number[];
-  views7d: number;
-  views28d: number;
-  views90d: number;
+  totalViews: number;
+  totalVideos: number;
 };
 
 type CompetitorVideoRow = {
@@ -68,8 +66,6 @@ type OutlierRow = {
   competitorId: number;
   tier: Tier;
 };
-
-type Period = "7d" | "28d" | "90d";
 
 function fmtCount(n: number | null | undefined): string {
   if (n === -1) return "Hidden";
@@ -111,7 +107,6 @@ export default function CompetitorDetailPage({
   const [patching, setPatching] = useState(false);
   const [refreshingMeta, setRefreshingMeta] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [period, setPeriod] = useState<Period>("28d");
 
   const refresh = useCallback(async () => {
     try {
@@ -255,8 +250,6 @@ export default function CompetitorDetailPage({
   }
 
   const initial = (comp.title ?? comp.handle ?? "?").slice(0, 1).toUpperCase();
-  const viewsForPeriod =
-    period === "7d" ? comp.views7d : period === "28d" ? comp.views28d : comp.views90d;
   const recentVideos = [...videos]
     .sort((a, b) => (b.published_at ?? 0) - (a.published_at ?? 0))
     .slice(0, 20);
@@ -379,31 +372,19 @@ export default function CompetitorDetailPage({
               label="Subs"
               value={fmtCountSyncAware(comp.subscriberCount, comp.syncStatus)}
             />
-            <ViewsMetric
-              value={viewsForPeriod}
-              period={period}
-              onPeriodChange={setPeriod}
+            <ViewsTrackedMetric
+              totalViews={comp.totalViews}
+              totalVideos={comp.totalVideos}
               syncStatus={comp.syncStatus}
             />
-            <div>
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                Outliers 60d
-              </div>
-              <div className="mt-0.5 text-base font-semibold">
-                {comp.syncStatus === "queued" || comp.syncStatus === "syncing"
+            <Metric
+              label="Outliers 60d"
+              value={
+                comp.syncStatus === "queued" || comp.syncStatus === "syncing"
                   ? "Fetching…"
-                  : String(comp.outliers60d)}
-              </div>
-              {comp.medianViews60d !== null &&
-                comp.outliers60d2x - comp.outliers60d >= 2 && (
-                  <div
-                    className="mt-0.5 text-[10px] leading-tight text-muted-foreground/70"
-                    title={`At a 2× threshold this competitor would surface ${comp.outliers60d2x} outliers (vs ${comp.outliers60d} at 3×). Its catalogue is unusually consistent.`}
-                  >
-                    3× may be too strict ({comp.outliers60d2x} at 2×)
-                  </div>
-                )}
-            </div>
+                  : String(comp.outliers60d)
+              }
+            />
             <Metric label="Last upload" value={fmtRelative(comp.lastUploadAt)} />
           </div>
         </CardContent>
@@ -465,7 +446,7 @@ export default function CompetitorDetailPage({
                           <span
                             className={cn(
                               "rounded px-1 py-0.5 font-mono",
-                              multiplier >= 3
+                              multiplier >= 2
                                 ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
                                 : "text-muted-foreground"
                             )}
@@ -495,7 +476,7 @@ export default function CompetitorDetailPage({
           ) : outliers.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">
               No outliers from this competitor in the last 60 days. Either no
-              video crossed 3× their own median, or there aren&apos;t enough
+              video crossed 2× their own median, or there aren&apos;t enough
               videos in the window (the threshold needs at least 5).
             </div>
           ) : (
@@ -565,16 +546,18 @@ export default function CompetitorDetailPage({
           </h2>
           <p>
             An outlier is a video that beats <strong>its own channel&apos;s
-            median</strong> by 3× or more (MENTOR_METHOD §2). We do not use
-            absolute view thresholds — a 100K-view video on a 10K-subscriber
-            channel is a stronger signal than 1M views on a 5M-subscriber one.
+            median</strong>. We do not use absolute view thresholds — a 100K-view
+            video on a 10K-subscriber channel is a stronger signal than 1M
+            views on a 5M-subscriber one.
           </p>
           <p>
             The median is computed over the last <strong>60 days</strong> of
-            uploads (wider than the original 30-day rule — early tests showed
-            too few outliers for channels with bursty cadence). We need at
-            least 5 videos in that window before showing outliers; otherwise
-            the sample is too small to be statistically meaningful.
+            uploads, and the app default threshold is <strong>≥ 2×</strong> the
+            median. (MENTOR_METHOD §2 keeps 3× as the strict canonical
+            definition; 2× is what the app uses by default because 3× under-
+            surfaces signals on calmer, consistent channels.) We need at least
+            5 videos in the window before showing any outliers — otherwise
+            the sample is too small to be meaningful.
           </p>
           <p>
             Click any outlier to open it on YouTube. Use the AI Chat to ask
@@ -611,43 +594,33 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ViewsMetric({
-  value,
-  period,
-  onPeriodChange,
+function ViewsTrackedMetric({
+  totalViews,
+  totalVideos,
   syncStatus,
 }: {
-  value: number;
-  period: Period;
-  onPeriodChange: (p: Period) => void;
+  totalViews: number;
+  totalVideos: number;
   syncStatus: SyncStatus;
 }) {
   const working = syncStatus === "queued" || syncStatus === "syncing";
+  const tooltip =
+    totalVideos > 0
+      ? `Total views across the ${totalVideos} most recent videos we've synced. Real time-windowed view growth would require per-video snapshots over time — not implemented yet.`
+      : "No videos synced yet for this competitor.";
   return (
-    <div>
-      <div className="flex items-center justify-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-        <span>Views</span>
-        <div className="inline-flex items-center gap-0.5">
-          {(["7d", "28d", "90d"] as const).map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => onPeriodChange(p)}
-              className={cn(
-                "rounded px-1 text-[9px] leading-none transition-colors",
-                period === p
-                  ? "bg-primary/15 text-primary"
-                  : "text-muted-foreground/70 hover:text-foreground"
-              )}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
+    <div title={tooltip}>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        Views (tracked)
       </div>
       <div className="mt-0.5 text-base font-semibold">
-        {working ? "Fetching…" : fmtCount(value)}
+        {working ? "Fetching…" : fmtCount(totalViews)}
       </div>
+      {!working && (
+        <div className="text-[10px] leading-tight text-muted-foreground/70">
+          across {totalVideos} {totalVideos === 1 ? "video" : "videos"}
+        </div>
+      )}
     </div>
   );
 }

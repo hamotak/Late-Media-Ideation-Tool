@@ -13,11 +13,11 @@ import {
  *   - list_outliers chat tool (the central ideation agent in /chat)
  *
  * Defaults to the unfiltered view: scope to the active channel, last
- * 60-day window, all tiers, multiplier ≥ 3 (per MENTOR_METHOD §2 — the
- * window was widened from 30d to 60d after early tests showed too few
- * outliers for channels with bursty upload cadence). The underlying SQL
- * helper in db.ts already enforces "needs ≥ 5 videos in the window" for
- * statistical sanity.
+ * 60-day window, all tiers, multiplier ≥ 2 (in-app default — the strict
+ * MENTOR_METHOD §2 canonical is 3×, but 2× is what the app uses for
+ * surfacing signals on calmer channels where 3× under-surfaces). The
+ * underlying SQL helper in db.ts already enforces "needs ≥ 5 videos in
+ * the window" for statistical sanity.
  *
  * No window/multiplier/tier pills on /outliers anymore — that nuance
  * lives in the chat agent. Callers can still pass overrides when they
@@ -43,7 +43,7 @@ export function listOutliersForActiveChannel(
   return outliersForUserChannel({
     userChannelId,
     windowDays: opts.windowDays ?? 60,
-    minMultiplier: opts.minMultiplier ?? 3,
+    minMultiplier: opts.minMultiplier ?? 2,
     tiers: opts.tiers ?? [...COMPETITOR_TIERS],
     limit: opts.limit ?? 50,
     competitorId: opts.competitorId ?? null,

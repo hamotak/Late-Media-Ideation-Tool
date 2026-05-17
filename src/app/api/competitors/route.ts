@@ -193,13 +193,11 @@ function toWire(c: Competitor, metrics?: CompetitorMetrics) {
     syncError: c.sync_error,
     similarityScore: c.similarity_score,
     outliers60d: metrics?.outliers60d ?? 0,
-    outliers60d2x: metrics?.outliers60d2x ?? 0,
     medianViews60d: metrics?.medianViews60d ?? null,
     lastUploadAt: metrics?.lastUploadAt ?? null,
     recentVideoViews: metrics?.recentVideoViews ?? [],
-    views7d: metrics?.views7d ?? 0,
-    views28d: metrics?.views28d ?? 0,
-    views90d: metrics?.views90d ?? 0,
+    totalViews: metrics?.totalViews ?? 0,
+    totalVideos: metrics?.totalVideos ?? 0,
   };
 }
 

@@ -19,8 +19,8 @@ export const runtime = "nodejs";
  *
  * Optional overrides preserved for legacy callers (chat tools that want
  * a tighter window/multiplier) — pass `?window=` / `?minMultiplier=` /
- * `?tiers=` to opt in. Default behaviour: 30d window, 3× multiplier,
- * all tiers (per MENTOR_METHOD §2 baseline).
+ * `?tiers=` to opt in. Default behaviour: 60d window, 2× multiplier,
+ * all tiers (in-app default; MENTOR_METHOD §2 canonical is 3×).
  */
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -48,11 +48,11 @@ export async function GET(req: Request) {
       ? windowParam
       : 60;
 
-  const multiplierParam = Number(url.searchParams.get("minMultiplier") ?? 3);
+  const multiplierParam = Number(url.searchParams.get("minMultiplier") ?? 2);
   const minMultiplier =
     Number.isFinite(multiplierParam) && multiplierParam >= 1
       ? multiplierParam
-      : 3;
+      : 2;
 
   const tiersParam = url.searchParams.get("tiers");
   const tiers = tiersParam

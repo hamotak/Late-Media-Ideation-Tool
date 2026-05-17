@@ -180,8 +180,8 @@ function OutliersInner() {
           Outliers
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Competitor videos that beat their own channel&apos;s median by 3× or
-          more. Methodology in{" "}
+          Competitor videos that beat their own channel&apos;s median by 2× or
+          more (configurable below). Methodology in{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-xs">
             MENTOR_METHOD.md §2
           </code>
@@ -251,19 +251,40 @@ function TabLink({
 
 /* ---------------- Library tab ---------------- */
 
+const MIN_MULT_KEY = "outliers.min_multiplier";
+const MIN_MULT_STOPS = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 10.0] as const;
+
+function readPersistedMultiplier(): number {
+  if (typeof window === "undefined") return 2;
+  const raw = window.localStorage.getItem(MIN_MULT_KEY);
+  if (!raw) return 2;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1) return 2;
+  return parsed;
+}
+
 function LibraryTab({ scope }: { scope: string | "all" | null }) {
   const [outliers, setOutliers] = useState<Outlier[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openOutlier, setOpenOutlier] = useState<Outlier | null>(null);
+  // Initialise from localStorage on first render so we don't double-fetch.
+  // SSR safety: readPersistedMultiplier guards `typeof window`.
+  const [minMult, setMinMult] = useState<number>(() => readPersistedMultiplier());
+
+  useEffect(() => {
+    window.localStorage.setItem(MIN_MULT_KEY, String(minMult));
+  }, [minMult]);
 
   useEffect(() => {
     if (scope === null) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    const qs = scope === "all" ? "?userChannelId=all" : `?userChannelId=${encodeURIComponent(scope)}`;
-    fetch(`/api/outliers${qs}`, { cache: "no-store" })
+    const params = new URLSearchParams();
+    params.set("userChannelId", scope === "all" ? "all" : scope);
+    params.set("minMultiplier", String(minMult));
+    fetch(`/api/outliers?${params.toString()}`, { cache: "no-store" })
       .then((r) => r.json())
       .then((d: { outliers?: Outlier[]; error?: string }) => {
         if (cancelled) return;
@@ -284,10 +305,38 @@ function LibraryTab({ scope }: { scope: string | "all" | null }) {
     return () => {
       cancelled = true;
     };
-  }, [scope]);
+  }, [scope, minMult]);
 
   return (
     <>
+      {/* Min outlier multiplier — single per-user display filter, persisted
+          to localStorage. The server-side default (the count rendered on
+          /competitors cards) stays at 2×; this slider only narrows what's
+          shown HERE on the Library tab. */}
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Min outlier multiplier:</span>
+        <div className="inline-flex flex-wrap items-center gap-1">
+          {MIN_MULT_STOPS.map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setMinMult(v)}
+              className={cn(
+                "rounded-full px-2.5 py-0.5 font-medium transition-colors",
+                minMult === v
+                  ? "bg-primary/15 text-primary"
+                  : "border border-border text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {v.toFixed(1)}×
+            </button>
+          ))}
+        </div>
+        <span className="ml-2 text-muted-foreground">
+          Showing outliers ≥ {minMult.toFixed(1)}×
+        </span>
+      </div>
+
       {error && (
         <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
           {error}
@@ -301,8 +350,9 @@ function LibraryTab({ scope }: { scope: string | "all" | null }) {
       ) : outliers.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            No outliers right now. Sync more competitors, or try again after
-            their videos have had time to accumulate views.
+            No outliers at ≥ {minMult.toFixed(1)}×. Try lowering the threshold,
+            sync more competitors, or wait for their recent videos to accumulate
+            views.
           </CardContent>
         </Card>
       ) : (

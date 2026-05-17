@@ -46,13 +46,11 @@ type Competitor = {
   syncError: string | null;
   similarityScore: number | null;
   outliers60d: number;
-  outliers60d2x: number;
   medianViews60d: number | null;
   lastUploadAt: number | null;
   recentVideoViews: number[];
-  views7d: number;
-  views28d: number;
-  views90d: number;
+  totalViews: number;
+  totalVideos: number;
 };
 
 type Kpis = {
@@ -106,7 +104,6 @@ type TopicGap = {
 };
 
 type Tab = "overview" | "gaps" | "alerts";
-type Period = "7d" | "28d" | "90d";
 
 // Tier display order — matches MENTOR_METHOD §1 strategic priority.
 // Breakthrough is the most predictive, so it sorts highest.
@@ -1055,7 +1052,6 @@ function CompetitorCard({
   retrying: boolean;
   onRetry: () => void;
 }) {
-  const [period, setPeriod] = useState<Period>("28d");
   const initial = (competitor.title ?? competitor.handle ?? "?")
     .slice(0, 1)
     .toUpperCase();
@@ -1064,30 +1060,10 @@ function CompetitorCard({
     e.stopPropagation();
   };
 
-  const viewsForPeriod =
-    period === "7d"
-      ? competitor.views7d
-      : period === "28d"
-        ? competitor.views28d
-        : competitor.views90d;
-
   const isQueued = competitor.syncStatus === "queued";
   const isSyncing = competitor.syncStatus === "syncing";
   const isFailed = competitor.syncStatus === "failed";
   const isWorking = isQueued || isSyncing;
-
-  // Surface a "threshold may be too strict" hint when the 2× variant
-  // would add at least 2 more outliers. Tight-cluster channels (e.g.
-  // very consistent uploaders) get penalised by the strict 3× rule —
-  // HAmo can read this hint and decide manually whether to relax it.
-  // Only show when the row has enough data for a meaningful comparison
-  // (≥ 1 outlier at 3× and at least 5 videos in the window — the SQL
-  // already drops sub-5-video competitors from medianViews60d).
-  const tooStrict =
-    !isWorking &&
-    !isFailed &&
-    competitor.medianViews60d !== null &&
-    competitor.outliers60d2x - competitor.outliers60d >= 2;
 
   return (
     <Link
@@ -1185,35 +1161,15 @@ function CompetitorCard({
                 label="Subs"
                 value={fmtCount(competitor.subscriberCount)}
               />
-              <ViewsMetric
-                value={viewsForPeriod}
-                period={period}
-                onPeriodChange={setPeriod}
-                onClickStop={stop}
+              <ViewsTrackedCell
+                totalViews={competitor.totalViews}
+                totalVideos={competitor.totalVideos}
               />
-              <div>
-                <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  Outliers 60d
-                </div>
-                <div
-                  className={cn(
-                    "mt-0.5 font-semibold",
-                    competitor.outliers60d > 0 &&
-                      "text-emerald-600 dark:text-emerald-400"
-                  )}
-                >
-                  {competitor.outliers60d}
-                </div>
-                {tooStrict && (
-                  <div
-                    className="mt-0.5 text-[9px] leading-tight text-muted-foreground/70"
-                    title={`At a 2× threshold this competitor would surface ${competitor.outliers60d2x} outliers (vs ${competitor.outliers60d} at 3×). Its catalogue is unusually consistent — the strict rule may be hiding real signals.`}
-                  >
-                    3× may be too strict
-                    <br />({competitor.outliers60d2x} at 2×)
-                  </div>
-                )}
-              </div>
+              <CardMetric
+                label="Outliers 60d"
+                value={String(competitor.outliers60d)}
+                highlight={competitor.outliers60d > 0}
+              />
               <CardMetric
                 label="Last upload"
                 value={fmtRelative(competitor.lastUploadAt)}
@@ -1223,6 +1179,30 @@ function CompetitorCard({
         </CardContent>
       </Card>
     </Link>
+  );
+}
+
+function ViewsTrackedCell({
+  totalViews,
+  totalVideos,
+}: {
+  totalViews: number;
+  totalVideos: number;
+}) {
+  const tooltip =
+    totalVideos > 0
+      ? `Total views across the ${totalVideos} most recent videos we've synced. Real time-windowed view growth would require per-video snapshots over time — not implemented yet.`
+      : "No videos synced yet for this competitor.";
+  return (
+    <div title={tooltip}>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        Views (tracked)
+      </div>
+      <div className="mt-0.5 font-semibold">{fmtCount(totalViews)}</div>
+      <div className="text-[9px] leading-tight text-muted-foreground/70">
+        across {totalVideos} {totalVideos === 1 ? "video" : "videos"}
+      </div>
+    </div>
   );
 }
 
@@ -1248,47 +1228,6 @@ function CardMetric({
       >
         {value}
       </div>
-    </div>
-  );
-}
-
-function ViewsMetric({
-  value,
-  period,
-  onPeriodChange,
-  onClickStop,
-}: {
-  value: number;
-  period: Period;
-  onPeriodChange: (p: Period) => void;
-  onClickStop: (e: React.MouseEvent) => void;
-}) {
-  return (
-    <div>
-      <div className="flex items-center justify-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-        <span>Views</span>
-        <div className="inline-flex items-center gap-0.5" onClick={onClickStop}>
-          {(["7d", "28d", "90d"] as const).map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={(e) => {
-                onClickStop(e);
-                onPeriodChange(p);
-              }}
-              className={cn(
-                "rounded px-1 text-[9px] leading-none transition-colors",
-                period === p
-                  ? "bg-primary/15 text-primary"
-                  : "text-muted-foreground/70 hover:text-foreground"
-              )}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="mt-0.5 font-semibold">{fmtCount(value)}</div>
     </div>
   );
 }

@@ -446,7 +446,7 @@ const STRATEGY_TOOLS: Tool[] = [
   {
     name: "list_outliers",
     description:
-      "List the active channel's competitor outliers — competitor videos that beat their own channel's 30-day median by 3× or more (per MENTOR_METHOD §2). Sorted by multiplier DESC. Always scoped to the active channel; no window/multiplier/tier filters here — that nuance lives on the /outliers page UI. Returns: { outliers: [{ videoId, title, thumbnailUrl, views, multiplier, channelMedian, publishedAt, competitorTitle, tier }] }.",
+      "List the active channel's competitor outliers — competitor videos that beat their own channel's 60-day median by 2× or more (in-app default; MENTOR_METHOD §2 canonical is 3×). Sorted by multiplier DESC. Always scoped to the active channel; no window/multiplier/tier filters here — that nuance lives on the /outliers page UI. Returns: { outliers: [{ videoId, title, thumbnailUrl, views, multiplier, channelMedian, publishedAt, competitorTitle, tier }] }.",
     input_schema: {
       type: "object",
       properties: {
@@ -1201,7 +1201,7 @@ export function buildSystemPrompt(
         `- competitor_gap_analysis — keywords frequent in competitor top videos that you've NEVER used`,
         ``,
         `### Outliers + ideation (the §2 + §9 engine)`,
-        `- list_outliers — competitor videos beating their own median 3×+, sorted by multiplier`,
+        `- list_outliers — competitor videos beating their own median 2×+ (60d window), sorted by multiplier`,
         `- explain_outlier — 2-3 §9 levers + reasoning for a specific outlier (cached permanently)`,
         `- generate_ideas — 5–10 ideas grounded in §1/§7/§9, traceable to source outliers (rate-limited 1/5min per channel)`,
         `- list_format_patterns — title-format templates extracted from outliers (§4 structural patterns)`,

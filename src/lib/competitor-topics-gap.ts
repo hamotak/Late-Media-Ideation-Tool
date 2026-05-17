@@ -76,7 +76,7 @@ function writeCache(userChannelId: string, payload: CachePayload): void {
  * different lens, different surface.
  *
  * Inputs:
- *   - competitor outliers (≥3× their channel median, last 60d)
+ *   - competitor outliers (≥2× their channel median, last 60d)
  *   - the user's own video catalogue titles (last 60d)
  *
  * Output: 5-15 topic gaps with example competitor video ids + reasoning.
@@ -117,11 +117,13 @@ export async function competitorTopicsGap(opts: {
     };
   }
 
-  // Competitor outliers — last 60 days, ≥3× their median, all tiers.
+  // Competitor outliers — last 60 days, ≥2× their median (in-app default),
+  // all tiers. MENTOR_METHOD §2 canonical is 3×; we use 2× to widen the
+  // pool of source signals before AI grouping.
   const { outliers } = outliersForUserChannel({
     userChannelId,
     windowDays: 60,
-    minMultiplier: 3,
+    minMultiplier: 2,
     tiers: [...COMPETITOR_TIERS],
     limit: 60,
   });

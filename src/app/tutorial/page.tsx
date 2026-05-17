@@ -88,7 +88,7 @@ export default function TutorialPage() {
           </li>
           <li>
             <ComingSoon /> Open <strong>Outliers</strong> → see which competitor
-            videos broke out 3× or more above their own channel&apos;s median.
+            videos broke out 2× or more above their own channel&apos;s median.
           </li>
           <li>
             <ComingSoon /> Open <strong>Topic Ideation</strong> → generate 10
@@ -170,7 +170,7 @@ export default function TutorialPage() {
 
           <PageDescription name="Outliers" href="/outliers" status="active">
             Two tabs. <strong>Library</strong> shows competitor videos that
-            beat their own channel&apos;s median by 3×+. Click any card →
+            beat their own channel&apos;s median by 2×+ (60-day window). Click any card →
             Claude tags it with &ldquo;what made it work&rdquo; levers
             (curiosity, nostalgia, counterintuitive, etc.) plus 2-3 sentences
             of reasoning. <strong>Patterns</strong> extracts title format
@@ -211,8 +211,10 @@ export default function TutorialPage() {
         <ul className="space-y-2 pl-5">
           <li className="list-disc">
             <strong>Outliers are relative.</strong> A video is an outlier if it
-            beats its own channel&apos;s median by 3× or more — not because it
-            crossed some absolute view threshold.
+            beats its own channel&apos;s median by 2× or more (the in-app default;
+            the canonical methodology in MENTOR_METHOD.md §2 keeps 3× as the
+            strict definition) — not because it crossed some absolute view
+            threshold.
           </li>
           <li className="list-disc">
             <strong>Validate topics across channels and time.</strong> A single

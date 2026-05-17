@@ -3205,32 +3205,35 @@ export function listCompetitorVideos(
 
 /**
  * Per-competitor metrics computed for the card UI:
- *  - `outliers60d`     count of videos where views > 3 × the channel's own
- *                      60-day median (per MENTOR_METHOD §2). 0 when the 60d
- *                      window has fewer than 5 videos (sample too small).
- *                      Window was widened from 30d to 60d after testing.
- *  - `outliers60d2x`   relaxed-threshold variant (≥ 2× the 60d median).
- *                      Drives the "consider 2× — gains N more" hint when
- *                      a competitor's catalogue is unusually consistent.
+ *  - `outliers60d`     count of videos where views > 2 × the channel's own
+ *                      60-day median. 0 when the 60d window has fewer than
+ *                      5 videos (sample too small). Window was widened
+ *                      from 30d to 60d, and the threshold was lowered from
+ *                      3× to 2×, both after testing on real data. The
+ *                      canonical methodology in MENTOR_METHOD.md §2 keeps
+ *                      3× as the strict definition; 2× is the in-app
+ *                      default for surfacing signals on calmer channels.
  *  - `medianViews60d`  the 60-day median itself (null when <5 videos).
  *  - `lastUploadAt`    MAX(published_at) across all videos for this
  *                      competitor (null when no videos).
  *  - `recentVideoViews` last 10 videos' views, most-recent first.
+ *  - `totalViews`      SUM(views) across every synced video for this
+ *                      competitor. Honest replacement for the old 7d/28d/
+ *                      90d toggle, which over-promised time-windowed
+ *                      growth we can't actually compute without per-video
+ *                      view snapshots over time.
+ *  - `totalVideos`     COUNT(*) across every synced video. Rendered as a
+ *                      muted subtitle "across N videos" below totalViews.
  *
- * All values come from ONE SQL round trip — no N+1. The query joins six
- * CTEs and returns one row per competitor in the scope.
+ * All values come from ONE SQL round trip — no N+1.
  */
 export type CompetitorMetrics = {
   outliers60d: number;
-  outliers60d2x: number;
   medianViews60d: number | null;
   lastUploadAt: number | null;
   recentVideoViews: number[];
-  // Total views in each window, for the per-card 7/28/90 toggle. Computed
-  // server-side from one SQL pass — saves shipping per-video timestamps.
-  views7d: number;
-  views28d: number;
-  views90d: number;
+  totalViews: number;
+  totalVideos: number;
 };
 
 export function competitorMetricsByCompetitor(
@@ -3259,14 +3262,6 @@ export function competitorMetricsByCompetitor(
          FROM competitor_videos v
          JOIN qualified_medians m ON m.competitor_id = v.competitor_id
          WHERE v.published_at > strftime('%s','now') - 60 * 86400
-           AND v.views > 3 * m.median_views
-         GROUP BY v.competitor_id
-       ),
-       outlier_60d_count_2x AS (
-         SELECT v.competitor_id, COUNT(*) AS n_outliers
-         FROM competitor_videos v
-         JOIN qualified_medians m ON m.competitor_id = v.competitor_id
-         WHERE v.published_at > strftime('%s','now') - 60 * 86400
            AND v.views > 2 * m.median_views
          GROUP BY v.competitor_id
        ),
@@ -3285,44 +3280,37 @@ export function competitorMetricsByCompetitor(
          FROM recent_videos WHERE rn <= 10
          GROUP BY competitor_id
        ),
-       views_by_window AS (
-         SELECT
-           v.competitor_id,
-           SUM(CASE WHEN v.published_at > strftime('%s','now') -  7 * 86400 THEN v.views ELSE 0 END) AS views_7d,
-           SUM(CASE WHEN v.published_at > strftime('%s','now') - 28 * 86400 THEN v.views ELSE 0 END) AS views_28d,
-           SUM(CASE WHEN v.published_at > strftime('%s','now') - 90 * 86400 THEN v.views ELSE 0 END) AS views_90d
+       views_total AS (
+         SELECT v.competitor_id,
+                SUM(v.views) AS total_views,
+                COUNT(*)     AS total_videos
          FROM competitor_videos v
          GROUP BY v.competitor_id
        )
        SELECT
          c.id                                  AS competitor_id,
          COALESCE(o.n_outliers, 0)             AS outliers60d,
-         COALESCE(o2.n_outliers, 0)            AS outliers60d2x,
          CAST(m.median_views AS INTEGER)       AS medianViews60d,
          l.last_upload_at                      AS lastUploadAt,
          COALESCE(r.recent_views_json, '[]')   AS recentVideoViewsJson,
-         COALESCE(w.views_7d, 0)               AS views7d,
-         COALESCE(w.views_28d, 0)              AS views28d,
-         COALESCE(w.views_90d, 0)              AS views90d
+         COALESCE(w.total_views, 0)            AS totalViews,
+         COALESCE(w.total_videos, 0)           AS totalVideos
        FROM competitors c
-       LEFT JOIN qualified_medians         m  ON m.competitor_id  = c.id
-       LEFT JOIN outlier_60d_count         o  ON o.competitor_id  = c.id
-       LEFT JOIN outlier_60d_count_2x      o2 ON o2.competitor_id = c.id
-       LEFT JOIN last_upload_by_competitor l  ON l.competitor_id  = c.id
-       LEFT JOIN recent_views_by_competitor r ON r.competitor_id  = c.id
-       LEFT JOIN views_by_window           w  ON w.competitor_id  = c.id
+       LEFT JOIN qualified_medians         m ON m.competitor_id = c.id
+       LEFT JOIN outlier_60d_count         o ON o.competitor_id = c.id
+       LEFT JOIN last_upload_by_competitor l ON l.competitor_id = c.id
+       LEFT JOIN recent_views_by_competitor r ON r.competitor_id = c.id
+       LEFT JOIN views_total               w ON w.competitor_id = c.id
        WHERE (? IS NULL OR c.user_channel_id = ?)`
     )
     .all(scope, scope, scope, scope) as {
     competitor_id: number;
     outliers60d: number;
-    outliers60d2x: number;
     medianViews60d: number | null;
     lastUploadAt: number | null;
     recentVideoViewsJson: string;
-    views7d: number;
-    views28d: number;
-    views90d: number;
+    totalViews: number;
+    totalVideos: number;
   }[];
 
   const map = new Map<number, CompetitorMetrics>();
@@ -3336,13 +3324,11 @@ export function competitorMetricsByCompetitor(
     }
     map.set(row.competitor_id, {
       outliers60d: row.outliers60d,
-      outliers60d2x: row.outliers60d2x,
       medianViews60d: row.medianViews60d,
       lastUploadAt: row.lastUploadAt,
       recentVideoViews: recent,
-      views7d: row.views7d,
-      views28d: row.views28d,
-      views90d: row.views90d,
+      totalViews: row.totalViews,
+      totalVideos: row.totalVideos,
     });
   }
   return map;
@@ -3373,14 +3359,6 @@ export function competitorMetricsForOne(
          CROSS JOIN qualified_median m
          WHERE v.competitor_id = ?
            AND v.published_at > strftime('%s','now') - 60 * 86400
-           AND v.views > 3 * m.median_views
-       ),
-       outliers_count_2x AS (
-         SELECT COUNT(*) AS n_outliers
-         FROM competitor_videos v
-         CROSS JOIN qualified_median m
-         WHERE v.competitor_id = ?
-           AND v.published_at > strftime('%s','now') - 60 * 86400
            AND v.views > 2 * m.median_views
        ),
        recent_views AS (
@@ -3396,25 +3374,19 @@ export function competitorMetricsForOne(
          SELECT MAX(published_at) AS last_upload_at
          FROM competitor_videos WHERE competitor_id = ?
        ),
-       views_windows AS (
-         SELECT
-           SUM(CASE WHEN published_at > strftime('%s','now') -  7 * 86400 THEN views ELSE 0 END) AS views_7d,
-           SUM(CASE WHEN published_at > strftime('%s','now') - 28 * 86400 THEN views ELSE 0 END) AS views_28d,
-           SUM(CASE WHEN published_at > strftime('%s','now') - 90 * 86400 THEN views ELSE 0 END) AS views_90d
+       views_total AS (
+         SELECT SUM(views) AS total_views, COUNT(*) AS total_videos
          FROM competitor_videos WHERE competitor_id = ?
        )
        SELECT
          COALESCE((SELECT n_outliers FROM outliers_count), 0)                AS outliers60d,
-         COALESCE((SELECT n_outliers FROM outliers_count_2x), 0)             AS outliers60d2x,
          (SELECT CAST(median_views AS INTEGER) FROM qualified_median)        AS medianViews60d,
          (SELECT last_upload_at FROM last_upload)                            AS lastUploadAt,
          COALESCE((SELECT recent_views_json FROM recent_views), '[]')        AS recentVideoViewsJson,
-         COALESCE((SELECT views_7d  FROM views_windows), 0)                  AS views7d,
-         COALESCE((SELECT views_28d FROM views_windows), 0)                  AS views28d,
-         COALESCE((SELECT views_90d FROM views_windows), 0)                  AS views90d`
+         COALESCE((SELECT total_views  FROM views_total), 0)                 AS totalViews,
+         COALESCE((SELECT total_videos FROM views_total), 0)                 AS totalVideos`
     )
     .get(
-      competitorId,
       competitorId,
       competitorId,
       competitorId,
@@ -3423,25 +3395,21 @@ export function competitorMetricsForOne(
     ) as
     | {
         outliers60d: number;
-        outliers60d2x: number;
         medianViews60d: number | null;
         lastUploadAt: number | null;
         recentVideoViewsJson: string;
-        views7d: number;
-        views28d: number;
-        views90d: number;
+        totalViews: number;
+        totalVideos: number;
       }
     | undefined;
   if (!row) {
     return {
       outliers60d: 0,
-      outliers60d2x: 0,
       medianViews60d: null,
       lastUploadAt: null,
       recentVideoViews: [],
-      views7d: 0,
-      views28d: 0,
-      views90d: 0,
+      totalViews: 0,
+      totalVideos: 0,
     };
   }
   let recent: number[] = [];
@@ -3453,21 +3421,21 @@ export function competitorMetricsForOne(
   }
   return {
     outliers60d: row.outliers60d,
-    outliers60d2x: row.outliers60d2x,
     medianViews60d: row.medianViews60d,
     lastUploadAt: row.lastUploadAt,
     recentVideoViews: recent,
-    views7d: row.views7d,
-    views28d: row.views28d,
-    views90d: row.views90d,
+    totalViews: row.totalViews,
+    totalVideos: row.totalVideos,
   };
 }
 
 /**
  * Aggregate KPI strip values for /competitors. competitors = count of rows
  * in scope; combinedSubs = SUM of subscriber_count; outliersThisWeek = count
- * of competitor_videos rows in scope where views > 3× the channel's 30-day
+ * of competitor_videos rows in scope where views > 2× the channel's 60-day
  * median AND published in the last 7 days; lastSync = MAX(last_sync_at).
+ * The strip itself was trimmed to Competitors + Last sync — the other
+ * two fields are computed for internal consistency only.
  */
 export type CompetitorListKpis = {
   competitors: number;
@@ -3515,7 +3483,7 @@ export function competitorListKpis(
        JOIN qualified_medians m ON m.competitor_id = v.competitor_id
        JOIN competitors c       ON c.id            = v.competitor_id
        WHERE v.published_at > strftime('%s','now') - 7 * 86400
-         AND v.views > 3 * m.median_views
+         AND v.views > 2 * m.median_views
          AND (? IS NULL OR c.user_channel_id = ?)`
     )
     .get(scope, scope, scope, scope) as { outliersThisWeek: number };
