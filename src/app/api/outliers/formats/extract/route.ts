@@ -41,5 +41,8 @@ export async function POST(req: Request) {
     videosLinked: result.videosLinked,
     lastExtractedAt: result.lastExtractedAt,
     formatsPassed: result.formatsPassed,
+    dropCounts: result.dropCounts,
+    topDropReason: result.topDropReason,
+    fallbackUsed: result.fallbackUsed,
   });
 }

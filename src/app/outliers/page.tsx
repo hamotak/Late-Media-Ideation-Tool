@@ -91,6 +91,20 @@ type FormatRow = {
   extractedAt: number;
   examples: FormatExample[];
   weekly: { weekIndex: number; n: number; avgMult: number }[];
+  // Flag set when the format only spans a single competitor (relaxed
+  // fallback pass). UI badges these "author pattern" so HAmo can tell
+  // a true cross-channel trend from a signature style at a glance.
+  isSingleChannel?: boolean;
+};
+
+const DROP_REASON_LABEL_UI: Record<string, string> = {
+  slot_count: "no slot variables",
+  literal_anchor: "examples didn't fit literal anchors",
+  per_example_multiplier: "examples below 2× multiplier",
+  min_examples: "fewer than 2 surviving examples",
+  avg_multiplier: "avg multiplier below 3×",
+  cross_channel: "examples all from one channel",
+  lexical_overlap: "examples share too much content",
 };
 
 const VIEW_MODE_KEY = "dashboard.viewMode";
@@ -1192,6 +1206,8 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
         formatsPassed?: number;
         error?: string;
         retryAfterSec?: number;
+        topDropReason?: { gate: string; count: number } | null;
+        fallbackUsed?: boolean;
       };
       if (!r.ok) {
         setExtractError(
@@ -1201,18 +1217,25 @@ function PatternsTab({ scope }: { scope: string | "all" | null }) {
         );
         return;
       }
-      // T1 soften: extraction is now best-effort — even 1-2 survivors
-      // ship instead of erroring out. When the pool is thin, surface a
-      // warning copy alongside the success count so HAmo knows to sync
-      // more competitors.
+      // T3 diag pass: extraction always ships best-effort. When the pool
+      // is thin (<3 survivors), surface the dominant drop reason so HAmo
+      // sees WHY the slate is sparse. The fallbackUsed flag annotates
+      // the toast when single-channel patterns were accepted.
       const passed = d.formatsPassed ?? d.formatsCreated ?? 0;
-      if (passed <= 2) {
+      if (passed < 3) {
+        const dropPhrase =
+          d.topDropReason && d.topDropReason.count > 0
+            ? ` Top drop reason: ${DROP_REASON_LABEL_UI[d.topDropReason.gate] ?? d.topDropReason.gate} (${d.topDropReason.count} dropped).`
+            : "";
+        const fallbackPhrase = d.fallbackUsed
+          ? " Used single-channel fallback — survivors flagged 'author pattern'."
+          : "";
         setExtractStatus(
-          `Only ${passed} format${passed === 1 ? "" : "s"} passed validation, covering ${d.videosLinked ?? 0} videos. Try syncing more competitors or widening the outlier window for richer patterns.`
+          `Only ${passed} format${passed === 1 ? "" : "s"} passed validation, covering ${d.videosLinked ?? 0} videos.${dropPhrase}${fallbackPhrase} Try syncing more competitors.`
         );
       } else {
         setExtractStatus(
-          `Extracted ${d.formatsCreated} formats covering ${d.videosLinked} videos.`
+          `Extracted ${d.formatsCreated} formats covering ${d.videosLinked} videos${d.fallbackUsed ? " (single-channel fallback)" : ""}.`
         );
       }
       await load();
@@ -1434,8 +1457,16 @@ function FormatCard({
         </button>
         {/* Template line with blue placeholders */}
         <div className="pr-8">
-          <div className="break-words text-base font-semibold leading-snug">
+          <div className="flex flex-wrap items-baseline gap-2 break-words text-base font-semibold leading-snug">
             <TemplateLine template={format.template} />
+            {format.isSingleChannel && (
+              <span
+                title="One competitor only — author pattern, not a cross-channel trend"
+                className="inline-flex shrink-0 items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400"
+              >
+                author pattern
+              </span>
+            )}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1 font-medium text-emerald-600 dark:text-emerald-400">

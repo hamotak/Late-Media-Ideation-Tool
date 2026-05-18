@@ -15,14 +15,12 @@ import { Button } from "@/components/ui/button";
 import { ChannelAudience } from "@/components/channel-audience";
 import { ChannelRevenue } from "@/components/channel-revenue";
 import {
-  AboutCard,
   ChannelDetailAnalytics,
   MetaCard,
   ThemesCard,
   TranscriptsCoverageCard,
 } from "@/components/channel-detail-widgets";
 import {
-  AgentMemoryPanel,
   DescriptionEditor,
   IdeationRulesEditor,
 } from "@/components/agent-brain-editors";
@@ -450,13 +448,10 @@ function SingleChannelCard({
               onSaved={(v) => handleFieldSaved("ideationRules", v)}
             />
           </div>
-          <SectionDivider label="Agent memory" />
-          <AgentMemoryPanel channelId={channel.channelId} />
         </CardContent>
       </Card>
 
       <SectionDivider label="Channel details" />
-      <AboutCard channel={detailChannel} />
       <MetaCard channel={detailChannel} />
       <ChannelAudience channelId={channel.channelId} />
       <ChannelRevenue channelId={channel.channelId} />

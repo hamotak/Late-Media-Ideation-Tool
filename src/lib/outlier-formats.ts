@@ -15,17 +15,50 @@ import { extractSection, loadMentorMethod } from "./mentor-method";
 import { listOutliersForActiveChannel } from "./outliers";
 import { log } from "./logger";
 
+/**
+ * Per-gate drop counts surfaced by the diagnostic log + the UI toast.
+ * Keys map 1:1 to the validation gates in validateAndDedupFormats so the
+ * page can quote the top reason when survivors are thin.
+ */
+export type FormatDropCounts = {
+  slot_count: number;
+  literal_anchor: number;
+  per_example_multiplier: number;
+  min_examples: number;
+  avg_multiplier: number;
+  cross_channel: number;
+  lexical_overlap: number;
+};
+
+export const DROP_REASON_LABEL: Record<keyof FormatDropCounts, string> = {
+  slot_count: "no slot variables",
+  literal_anchor: "examples didn't fit literal anchors",
+  per_example_multiplier: "examples below 2× multiplier",
+  min_examples: "fewer than 2 surviving examples",
+  avg_multiplier: "avg multiplier below 3×",
+  cross_channel: "examples all from one channel",
+  lexical_overlap: "examples share too much content",
+};
+
 export type ExtractResult =
   | {
       ok: true;
       formatsCreated: number;
       videosLinked: number;
       lastExtractedAt: number;
-      // T1 (soften pass): even on success we surface the survivor count so
-      // the UI can warn the user when the pool was thin ("only 2 formats
-      // passed validation — try syncing more competitors"). When the count
-      // is healthy (≥3) the page treats this as a normal success.
+      // Survivor count surfaced to the UI so the page can render a
+      // "thin pool" warning when ≤2 ship. ≥3 is the healthy band.
       formatsPassed: number;
+      // T3: per-gate attrition counters + the dominant drop reason
+      // (highest-count gate). The toast quotes this when survivors < 3
+      // so HAmo sees WHY the slate is thin.
+      dropCounts: FormatDropCounts;
+      topDropReason: { gate: keyof FormatDropCounts; count: number } | null;
+      // T3: fallback path. When the primary cross-channel validation
+      // produces zero survivors, we re-run with the cross-channel gate
+      // relaxed to ≥1 distinct competitor. Survivors from that run are
+      // flagged is_single_channel:true so the UI + agent can label them.
+      fallbackUsed: boolean;
     }
   | { ok: false; status: number; error: string; retryAfterSec?: number };
 
@@ -187,37 +220,71 @@ export async function extractFormatsFromOutliers(
     outliers.map((o) => [o.videoId, o.publishedAt ?? 0])
   );
 
-  // Post-LLM validation cascade. F1-F4 (slot count, anchor fit, marker
-  // order, cross-format dedup) carry over from prior PRs. T1/T3 add the
-  // trending-format rigour layer on top:
-  //   T1-iii — per-example multiplier ≥3× (drops examples below 3×; if
-  //            <3 survive, drop the format)
-  //   T1-v   — avg multiplier ≥5× across surviving examples
-  //   T1-vi  — pairwise content-word overlap ≤50%
-  //   T3     — cross-channel: surviving examples must span ≥2 competitor ids
-  //   T1-vii — cap at 8 formats total, sorted by avg multiplier DESC
-  // Per-criterion drop counts logged so HAmo can see which gate fired.
-  const parsed = validateAndDedupFormats(
+  // Post-LLM validation cascade (chained gates). Primary pass requires
+  // ≥2 distinct competitors per format. If that produces zero survivors,
+  // we re-run with the cross-channel gate relaxed to 1 distinct
+  // competitor — the survivors are then "author patterns" not "trends"
+  // and get flagged is_single_channel:true.
+  const primary = validateAndDedupFormats(
     rawParsed,
     titleByVideo,
     knownIds,
     multByVideo,
     competitorByVideo
   );
+  let parsed = primary.formats;
+  let fallbackUsed = false;
+  let finalDropCounts = primary.dropCounts;
+  if (parsed.length === 0) {
+    const relaxed = validateAndDedupFormats(
+      rawParsed,
+      titleByVideo,
+      knownIds,
+      multByVideo,
+      competitorByVideo,
+      { minDistinctCompetitors: 1 }
+    );
+    if (relaxed.formats.length > 0) {
+      parsed = relaxed.formats;
+      fallbackUsed = true;
+      finalDropCounts = relaxed.dropCounts;
+      log.info(
+        "claude",
+        `Format-extract ${channelId}: primary pass yielded 0; relaxed fallback (single-channel allowed) yielded ${parsed.length} formats`
+      );
+    }
+  }
+
+  // T3: structured per-gate diagnostic log. The page toast quotes the
+  // dominant drop reason when survivors are thin — surface it here too
+  // so HAmo can grep the app_logs table.
+  const candidates = rawParsed.length;
+  const totalDropped = Object.values(finalDropCounts).reduce((s, n) => s + n, 0);
+  const dropEntries = Object.entries(finalDropCounts) as Array<
+    [keyof FormatDropCounts, number]
+  >;
+  const topDropEntry = dropEntries
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1])[0];
+  const topDropReason: { gate: keyof FormatDropCounts; count: number } | null =
+    topDropEntry ? { gate: topDropEntry[0], count: topDropEntry[1] } : null;
+  log.info(
+    "claude",
+    `[diag] format_extraction channel=${channelId}: candidates=${candidates}, dropped_by_slot_count=${finalDropCounts.slot_count}, dropped_by_literal_anchor=${finalDropCounts.literal_anchor}, dropped_by_per_example_multiplier=${finalDropCounts.per_example_multiplier}, dropped_by_min_examples=${finalDropCounts.min_examples}, dropped_by_avg_multiplier=${finalDropCounts.avg_multiplier}, dropped_by_cross_channel=${finalDropCounts.cross_channel}, dropped_by_lexical_overlap=${finalDropCounts.lexical_overlap}, survivors=${parsed.length}${fallbackUsed ? " (FALLBACK single-channel)" : ""}`
+  );
+
   if (parsed.length === 0) {
     log.warn(
       "claude",
-      `Format-extract ${channelId}: 0 templates survived dedup/validation. Raw: ${raw.slice(0, 200)}`
+      `Format-extract ${channelId}: 0 templates survived even the single-channel fallback. Raw: ${raw.slice(0, 200)}`
     );
-    // Soften-pass copy: tell the user exactly what happened (zero passed)
-    // and what to try (more competitors, broader sync window). The
-    // per-criterion drop counts are in the dev log line above for HAmo to
-    // audit if the data feels right but the result feels wrong.
+    const topReasonLabel = topDropReason
+      ? `Top drop reason: ${DROP_REASON_LABEL[topDropReason.gate]} (${topDropReason.count} dropped). `
+      : "";
     return {
       ok: false,
       status: 502,
-      error:
-        "Only 0 formats passed validation. Try syncing more competitors or widening the outlier window.",
+      error: `Only 0 formats passed validation. ${topReasonLabel}Try syncing more competitors or widening the outlier window.`,
     };
   }
 
@@ -285,6 +352,7 @@ export async function extractFormatsFromOutliers(
       totalViewsMonth,
       risingRate: Number(risingRate.toFixed(2)),
       model,
+      isSingleChannel: fallbackUsed,
     });
     if (formatId < 0) continue;
 
@@ -315,6 +383,9 @@ export async function extractFormatsFromOutliers(
     // overlap, cap). The UI surfaces a "thin pool" warning when this is
     // 1 or 2, even though the upsert loop happily wrote them.
     formatsPassed: parsed.length,
+    dropCounts: finalDropCounts,
+    topDropReason,
+    fallbackUsed,
   };
 }
 
@@ -431,13 +502,20 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return union === 0 ? 0 : intersection / union;
 }
 
+type ValidatedFormats = {
+  formats: Array<{ template: string; videoIds: string[] }>;
+  dropCounts: FormatDropCounts;
+};
+
 function validateAndDedupFormats(
   parsed: Array<{ template: string; videoIds: string[] }>,
   titleByVideo: Map<string, string>,
   knownIds: Set<string>,
   multByVideo: Map<string, number>,
-  competitorByVideo: Map<string, number>
-): Array<{ template: string; videoIds: string[] }> {
+  competitorByVideo: Map<string, number>,
+  opts: { minDistinctCompetitors?: number } = {}
+): ValidatedFormats {
+  const minDistinctCompetitors = opts.minDistinctCompetitors ?? MIN_DISTINCT_COMPETITORS;
   const slotCount = (template: string): number =>
     (template.match(/\[[^\]]+\]/g) || []).length;
 
@@ -537,6 +615,10 @@ function validateAndDedupFormats(
     llmIndex: number; // position in original LLM output (tiebreaker)
     examples: ExWithFit[];
   };
+  // Count per-example fit failures (the literal-anchor + structural-marker
+  // gate) for the diagnostic log. The gate runs INSIDE this map, so we
+  // tally drops here rather than diff'ing array lengths after the fact.
+  let droppedByLiteralAnchor = 0;
   const fitsByFormat: FmtWithFits[] = slotPassed.map((f, i) => {
     const examples: ExWithFit[] = [];
     for (const vid of f.videoIds) {
@@ -544,7 +626,10 @@ function validateAndDedupFormats(
       const title = titleByVideo.get(vid);
       if (!title) continue;
       const fit = fitFor(f.template, title);
-      if (!fit.pass) continue;
+      if (!fit.pass) {
+        droppedByLiteralAnchor++;
+        continue;
+      }
       examples.push({ videoId: vid, fit });
     }
     return { template: f.template, llmIndex: i, examples };
@@ -610,14 +695,18 @@ function validateAndDedupFormats(
   const afterAvg = withAvg.filter((f) => f.avgMultiplier >= AVG_MULTIPLIER_MIN);
   const droppedByAvg = withAvg.length - afterAvg.length;
 
-  // --- T3: ≥2 distinct competitor_ids across surviving examples.
+  // --- T3: cross-channel gate. Default ≥2 distinct competitor_ids; the
+  // single-channel fallback path passes minDistinctCompetitors=1 to keep
+  // signature-style templates. Survivors of the relaxed pass are flagged
+  // is_single_channel at the upsert layer so the agent + UI can label
+  // them "(author-pattern, not cross-channel)".
   const afterCrossChannel = afterAvg.filter((f) => {
     const ids = new Set<number>();
     for (const e of f.examples) {
       const cid = competitorByVideo.get(e.videoId);
       if (cid !== undefined) ids.add(cid);
     }
-    return ids.size >= MIN_DISTINCT_COMPETITORS;
+    return ids.size >= minDistinctCompetitors;
   });
   const droppedSingleChannel = afterAvg.length - afterCrossChannel.length;
 
@@ -645,17 +734,24 @@ function validateAndDedupFormats(
     (a, b) => b.avgMultiplier - a.avgMultiplier
   );
   const final = sorted.slice(0, MAX_TRENDING_FORMATS);
-  const droppedByCap = sorted.length - final.length;
 
-  log.info(
-    "claude",
-    `Format-validate: raw=${parsed.length} → slot=${slotPassed.length} (F3 drop ${droppedF3}) → minSize=${afterMinSize.length} (per-example<${PER_EXAMPLE_MIN_MULTIPLIER}× drop ${droppedByPerExampleMult}, <${MIN_EXAMPLES_PER_FORMAT} examples drop ${droppedTooFew}) → avg≥${AVG_MULTIPLIER_MIN}×=${afterAvg.length} (drop ${droppedByAvg}) → cross-channel=${afterCrossChannel.length} (drop ${droppedSingleChannel}) → overlap≤${MAX_CONTENT_OVERLAP * 100}%=${afterContentOverlap.length} (drop ${droppedByOverlap}) → cap${MAX_TRENDING_FORMATS}=${final.length} (drop ${droppedByCap}).`
-  );
+  const dropCounts: FormatDropCounts = {
+    slot_count: droppedF3,
+    literal_anchor: droppedByLiteralAnchor,
+    per_example_multiplier: droppedByPerExampleMult,
+    min_examples: droppedTooFew,
+    avg_multiplier: droppedByAvg,
+    cross_channel: droppedSingleChannel,
+    lexical_overlap: droppedByOverlap,
+  };
 
-  return final.map((f) => ({
-    template: f.template,
-    videoIds: f.examples.map((e) => e.videoId),
-  }));
+  return {
+    formats: final.map((f) => ({
+      template: f.template,
+      videoIds: f.examples.map((e) => e.videoId),
+    })),
+    dropCounts,
+  };
 }
 
 function parseFormats(

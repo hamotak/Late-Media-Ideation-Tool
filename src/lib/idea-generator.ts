@@ -43,9 +43,19 @@ export type DroppedIdea = {
     | "topic_overused"
     | "originality"
     | "topic_dup"
+    | "no_anchor"
     | "own_channel";
   detail?: string;
 };
+
+/**
+ * Anchor check: each idea must be grounded in a trending format OR a
+ * cross-channel viral topic (≥2 topicSimilarOutliers from DIFFERENT
+ * competitors, each with multiplier ≥3). Both is ideal; neither is a
+ * hard drop. Returns the anchor type for the post-LLM filter.
+ */
+const ANCHOR_TOPIC_MIN_MULTIPLIER = 3;
+const ANCHOR_TOPIC_MIN_DISTINCT_COMPETITORS = 2;
 
 // Outliers-primary pool. Soften pass (T2 of follow-up PR): the prior
 // format×topic pipeline required ≥5× / 14d outliers AND ≥3-example
@@ -901,7 +911,9 @@ export async function generateIdeasForChannel(opts: {
   //        otherFormatExamples (format siblings) — users want to see
   //        who else covered the SAME TOPIC and how hard it hit, not
   //        more videos using the same shape.
-  const ideas: ProposedIdea[] = surviving.map((a) => {
+  // First map every survivor to its ProposedIdea shape so we can inspect
+  // both anchors (sourceFormat + topicSimilarOutliers) in one pass.
+  const mapped = surviving.map((a) => {
     const fmt =
       a.sourceFormatId !== null ? formatById.get(a.sourceFormatId) : null;
     const validation = validateIdeaAgainstOwnCatalog({
@@ -915,46 +927,79 @@ export async function generateIdeasForChannel(opts: {
       { limit: 3, excludeVideoIds: [...sourceIds] }
     );
     return {
-      sourceOutlierVideoId: a.sources[0]?.videoId ?? "",
-      // Free-form ideas leave sourceFormat at null; the agent's markdown
-      // omits the "Format:" line for those rows.
-      sourceFormat:
-        fmt && a.sourceFormatId !== null
-          ? {
-              id: a.sourceFormatId,
-              template: fmt.template,
-              risingRate: fmt.risingRate,
-              exampleCount: fmt.examples,
-            }
-          : null,
-      sourceTopicOutliers: a.sources.map((s) => {
-        const m = Math.round(s.multiplier * 10) / 10;
-        return {
-          videoId: s.videoId,
-          title: s.title,
-          multiplier: m,
-          thumbnailUrl: s.thumbnailUrl,
-          competitorTitle: s.competitorTitle,
-          competitorHandle: s.competitorHandle,
-          performanceBand: performanceBandFor(m),
-        };
-      }),
-      topicSimilarOutliers,
-      topicLabel: a.topicLabel,
-      proposedTitle: a.proposedTitle,
-      angle: a.angle,
-      confidence: a.confidence,
-      originalityScore: Math.round(a.originalityScore * 100) / 100,
-      validation,
-      titleLengthBand:
-        titleLengthBandFor(a.proposedTitle) === "ideal" ? "ideal" : "acceptable",
-      topicFrequencyCheck: {
-        matches: prefilter.topicFrequency.get(a.topicLabel)?.matches ?? 0,
-        matchedVideos:
-          prefilter.topicFrequency.get(a.topicLabel)?.matchedVideos ?? [],
-      },
+      raw: a,
+      shaped: {
+        sourceOutlierVideoId: a.sources[0]?.videoId ?? "",
+        sourceFormat:
+          fmt && a.sourceFormatId !== null
+            ? {
+                id: a.sourceFormatId,
+                template: fmt.template,
+                risingRate: fmt.risingRate,
+                exampleCount: fmt.examples,
+              }
+            : null,
+        sourceTopicOutliers: a.sources.map((s) => {
+          const m = Math.round(s.multiplier * 10) / 10;
+          return {
+            videoId: s.videoId,
+            title: s.title,
+            multiplier: m,
+            thumbnailUrl: s.thumbnailUrl,
+            competitorTitle: s.competitorTitle,
+            competitorHandle: s.competitorHandle,
+            performanceBand: performanceBandFor(m),
+          };
+        }),
+        topicSimilarOutliers,
+        topicLabel: a.topicLabel,
+        proposedTitle: a.proposedTitle,
+        angle: a.angle,
+        confidence: a.confidence,
+        originalityScore: Math.round(a.originalityScore * 100) / 100,
+        validation,
+        titleLengthBand:
+          titleLengthBandFor(a.proposedTitle) === "ideal" ? "ideal" : "acceptable" as "ideal" | "acceptable",
+        topicFrequencyCheck: {
+          matches: prefilter.topicFrequency.get(a.topicLabel)?.matches ?? 0,
+          matchedVideos:
+            prefilter.topicFrequency.get(a.topicLabel)?.matchedVideos ?? [],
+        },
+      } satisfies ProposedIdea,
     };
   });
+
+  // T5: viral_format × viral_topic enforcement. Every idea must anchor
+  // in EITHER a trending format (sourceFormat !== null) OR a cross-
+  // channel viral topic (≥2 topicSimilarOutliers from DIFFERENT
+  // competitors, each with multiplier ≥3). Drops surface as
+  // reason:"no_anchor" so HAmo can see why the slate shrank.
+  const hasViralTopicAnchor = (
+    sims: ProposedIdea["topicSimilarOutliers"]
+  ): boolean => {
+    const strong = sims.filter(
+      (s) =>
+        s.multiplier >= ANCHOR_TOPIC_MIN_MULTIPLIER && !!s.competitorTitle
+    );
+    if (strong.length < ANCHOR_TOPIC_MIN_DISTINCT_COMPETITORS) return false;
+    const distinctChannels = new Set(strong.map((s) => s.competitorTitle));
+    return distinctChannels.size >= ANCHOR_TOPIC_MIN_DISTINCT_COMPETITORS;
+  };
+  const ideas: ProposedIdea[] = [];
+  for (const { shaped } of mapped) {
+    const hasFormatAnchor = shaped.sourceFormat !== null;
+    const hasTopicAnchor = hasViralTopicAnchor(shaped.topicSimilarOutliers);
+    if (!hasFormatAnchor && !hasTopicAnchor) {
+      dropped.push({
+        topicLabel: shaped.topicLabel,
+        proposedTitle: shaped.proposedTitle,
+        reason: "no_anchor",
+        detail: `no trending format AND no cross-channel viral topic (≥2 competitors at ≥${ANCHOR_TOPIC_MIN_MULTIPLIER}×)`,
+      });
+      continue;
+    }
+    ideas.push(shaped);
+  }
 
   // The attrition log already fired before mapping survivors — see
   // dropCounts log above. This second info-line just summarises the
@@ -1066,7 +1111,8 @@ function buildSystemPromptForCompose(opts: {
     LEVERS.map((l) => `"${l}"`).join(", "),
     "",
     "# Hard rules",
-    `- Output ${OVER_FETCH_IDEAS} candidate ideas — the server will drop some via length/banned-word/banned-topic/topic-frequency/originality/topic-dup filters and ship up to ${MAX_IDEAS}. Quality over quantity.`,
+    `- Output ${OVER_FETCH_IDEAS} candidate ideas — the server drops some via length / banned-word / banned-topic / topic-frequency / originality / topic-dup / no-anchor filters and ships up to ${MAX_IDEAS}. Quality over quantity.`,
+    "- ANCHOR RULE — each idea MUST be anchored in EITHER (a) a trending format (sourceFormatId set to an id from TRENDING FORMATS), OR (b) a cross-channel viral topic (the source outlier has ≥2 cross-channel siblings at ≥3× — the server picks these from competitor data on your behalf, you just need to ensure the topicLabel describes something that's actually moving across multiple channels). Ideally BOTH. Ideas grounded in neither are dropped by the server. If you cannot find either anchor for an outlier you picked, skip it and pick a different one from the pool.",
     "- Each idea cites exactly ONE source outlier in sourceTopicOutlierIds (use exactly one element).",
     "- sourceFormatId is either a numeric id from TRENDING FORMATS or null. NEVER invent a format id.",
     "- topicLabel is 4–8 words, the subject area, NOT the proposed title. Two ideas on the same topic will be deduped — DIVERSIFY topics across the slate.",

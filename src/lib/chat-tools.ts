@@ -2,11 +2,9 @@ import "server-only";
 import type Anthropic from "@anthropic-ai/sdk";
 import {
   banOutlierFormat,
-  deleteChannelMemory,
   findOutlierFormatsByTemplateMatch,
   getActiveChannelId,
   getChannel,
-  getChannelMemory,
   getIntegration,
   getOutlierFormatById,
   getSetting,
@@ -18,9 +16,9 @@ import {
   searchComments,
   searchTranscripts,
   unbanOutlierFormat,
-  upsertChannelMemory,
   videoStats,
 } from "./db";
+import { exaSearch } from "./exa";
 import { extractSection, loadMentorMethod } from "./mentor-method";
 import {
   fetchChannelOverview,
@@ -243,33 +241,40 @@ const IDEATION_TOOLS: Tool[] = [
   {
     name: "generate_ideas",
     description: [
-      "Compose up to 10 new YouTube video ideas. OUTLIERS-PRIMARY pipeline: server pulls top 30 competitor outliers ≥1.5× channel median in last 28d (PRIMARY inspiration) + top 5 trending formats (OPTIONAL remix templates, may be empty). Claude composes 1 idea per outlier; ~40% remix with a format (sourceFormat set), ~60% are free-form (sourceFormat null). Pass mode:\"free-form\" to force every idea to sourceFormat:null. Server drops via: length 50-80, banned words (op rule 13), per-channel banned_topics, topic-frequency (≥1 in last 20 own uploads), originality (≤45% overlap), topic-cluster dedup. Drops returned in `dropped[]`.",
+      "Compose up to 10 new YouTube video ideas. OUTLIERS-PRIMARY pipeline: server pulls top 30 competitor outliers ≥1.5× channel median in last 28d (PRIMARY inspiration) + top 5 trending formats (OPTIONAL remix templates, may be empty). Claude composes 1 idea per outlier; ~40% remix with a format (sourceFormat set), ~60% are free-form (sourceFormat null). Pass mode:\"free-form\" to force every idea to sourceFormat:null. Server drops via: length 50-80, banned words (op rule 13), per-channel banned_topics, topic-frequency (≥1 in last 20 own uploads), originality (≤45% overlap), topic-cluster dedup, NO-ANCHOR (no trending format AND <2 cross-channel topic siblings at ≥3× — both anchors missing = drop). Drops returned in `dropped[]`.",
       "",
-      "Each surviving idea has: sourceFormat ({id,template,risingRate,exampleCount}) | null, sourceTopicOutliers (1-3 with multiplier+thumbnailUrl+performanceBand+competitorTitle/Handle), topicSimilarOutliers (up to 3 cross-channel topic siblings — empty when none), topicLabel, proposedTitle, angle, confidence, validation, titleLengthBand. Top-level also returns bannedTopics:string[].",
+      "Each surviving idea has: sourceFormat ({id,template,risingRate,exampleCount}) | null, sourceTopicOutliers (1-3 with multiplier+thumbnailUrl+performanceBand+competitorTitle/Handle), topicSimilarOutliers (1-3 cross-channel topic siblings — guaranteed ≥1 when sourceFormat is null, since the anchor rule requires at least one anchor), topicLabel, proposedTitle, angle, confidence, validation, titleLengthBand. Top-level also returns bannedTopics:string[].",
       "",
       "## OUTPUT FORMAT (MANDATORY when you present ideas in chat)",
       "Open with a pre-ideation research block, then list each idea in this exact terse markdown structure, then close with a one-sentence Next step. NO prose paragraphs anywhere. NO 'Why this format works'. NO levers row.",
       "",
       "Pre-ideation research block (output FIRST):",
-      "**Pattern research (last 28d):**",
-      "- Working: {3-5 themes from list_outliers/list_format_patterns — viral ≥3×, plain language, ≤8 words each}",
+      "**Pattern research (last 14d):**",
+      "- Top viral formats (last 14d): {3-5 format templates with example counts and avg multipliers — pull from list_format_patterns. Plain text, ≤10 words each.}",
+      "- Top viral topics (last 14d): {3-5 topic themes ranked by cross-channel signal — count of distinct competitors winning with the topic × max multiplier. Pull from list_outliers grouped by topic. ≤8 words each.}",
       "- Not working: {topics with ≥2 underperformers in last 20 own uploads — pull from validate_idea matchedVideos where performanceBand='underperformed', ≤8 words each}",
-      "- Skipped: {banned topics from bannedTopics + drops from dropped[] where reason='topic_overused'. Cite term + count.}",
-      "Rules: bullets only, ≤5 items per bullet group, ≤8 words each. OMIT a line if its group is empty (don't print 'Working: (none)').",
+      "- Skipped: {banned topics from bannedTopics + drops from dropped[] where reason='topic_overused' or reason='no_anchor'. Cite term + count.}",
+      "Rules: bullets only, ≤5 items per group. OMIT a line if its group is empty — never print 'Top viral formats: (none)'.",
       "",
       "Then each numbered idea — EXACTLY this markdown shape:",
       "### {n}. {proposedTitle}",
       "",
       "[![]({sourceOutlier.thumbnailUrl})](https://www.youtube.com/watch?v={sourceOutlier.videoId}) **Inspired by:** [{sourceOutlier.competitorTitle} — {sourceOutlier.title}](https://www.youtube.com/watch?v={sourceOutlier.videoId}) · {performanceBand} ({multiplier}×)",
       "",
-      "**Same topic across competitors:** (OMIT this entire block when topicSimilarOutliers is empty)",
+      "**Same topic across competitors:** (REQUIRED when sourceFormat is null — show 1-2 entries; the server guarantees ≥1 in that case)",
       "- [![](thumbnail)](url) [competitorTitle — title](url) · performanceBand (multiplier×)",
+      "(If sourceFormat is set AND topicSimilarOutliers is empty, OMIT this entire block — the format anchor carries the proof. If sourceFormat is set AND topicSimilarOutliers ≥1, show up to 2 entries.)",
       "",
-      "**Format:** `{template}` · rising {risingRate}    (OMIT this entire line when sourceFormat is null)",
+      "**Format:** `{template}` · rising {risingRate} (OMIT this entire line when sourceFormat is null)",
       "",
       "{catalogEmoji} {catalogVerdictShort}",
       "",
       "---",
+      "",
+      "Hard rules:",
+      "- Either Format: or Same topic: must be present for every idea — at least one anchor is required. Both is ideal. The server enforces this with the NO-ANCHOR drop gate; you should never see an idea here that's missing both.",
+      "- If a format is flagged is_single_channel (author-pattern, not cross-channel), prefix the format line with '(author pattern) ' so the user understands it's a softer signal than a true trend.",
+      "- Never print '(none)' — if topicSimilarOutliers is empty for a format-anchored idea, omit the entire 'Same topic' block.",
       "",
       "catalogEmoji + catalogVerdictShort map from validation.verdict:",
       "  fresh → ✅ Fresh territory  |  covered_old → ⚠️ Touched 60-90d ago, none since",
@@ -426,61 +431,20 @@ const IDEATION_TOOLS: Tool[] = [
     },
   },
   {
-    name: "save_channel_memory",
+    name: "web_search",
     description:
-      "Save a durable fact about the active channel that should persist across chat sessions — e.g. 'sponsor_policy → never does sponsor reads', 'upload_cadence → ships 1 video per week, Fridays'. TWO-STEP CONFIRM IS MANDATORY (mirror update_channel_context). First call ALWAYS with confirm:false — the tool returns the proposed write (key, value, before/after if updating). Show it to the user, ask 'yes' / 'edit' / 'no'. Only after explicit approval do you call AGAIN with confirm:true and the SAME payload. NEVER call with confirm:true in the same turn as the user's initial mention. Active channel resolved server-side. Both key and value cap at 2000 chars after trim. Keys are stable identifiers (snake_case recommended — e.g. 'sponsor_policy', 'video_length_target'), values are the prose fact. confidence defaults to 0.8 — set lower (0.4-0.6) when the fact is inferred rather than stated. Returns (confirm:false): { pending:true, action:'create'|'update', key, before, after, agentInstruction }. Returns (confirm:true): { applied:true, key, message }.",
+      "Search the web for current viral angles, recent news, or trending topics in the channel's niche. Use ONLY when (a) list_outliers and list_format_patterns don't surface enough viral signal in the last 14 days, OR (b) the user explicitly asks about a topic happening outside the tracked competitor set. Returns 5-10 results with title + URL + snippet. Do NOT use for general knowledge questions — those go through your training data. Cost: 1 Exa API call (~$0.005). Always cite source URLs in your reply.",
     input_schema: {
       type: "object",
       properties: {
-        key: {
+        query: {
           type: "string",
           description:
-            "Stable identifier for the fact (snake_case, e.g. 'sponsor_policy'). Same key overwrites the existing fact.",
+            "Search phrase. Include the channel niche + a recency anchor (\"trending this week\" / \"viral last 7 days\") when discovering viral topics.",
         },
-        value: {
-          type: "string",
-          description:
-            "The fact itself, prose. Caps at 2000 chars after trim.",
-        },
-        source: {
-          type: "string",
-          description:
-            "Optional traceability tag — e.g. 'chat:user-said' or 'chat:inferred'. Defaults to 'chat:save_channel_memory'.",
-        },
-        confidence: {
-          type: "number",
-          description:
-            "0..1 confidence. Default 0.8 for explicit user statements; lower for inferred facts.",
-        },
-        confirm: {
-          type: "boolean",
-          description:
-            "Always false on the first call (returns the proposed write). Set true only after explicit user approval — with the SAME payload.",
-          default: false,
-        },
+        numResults: { type: "number", default: 8, minimum: 1, maximum: 10 },
       },
-      required: ["key", "value"],
-    },
-  },
-  {
-    name: "forget_channel_memory",
-    description:
-      "Delete one durable fact about the active channel by key. TWO-STEP CONFIRM IS MANDATORY (mirror update_channel_context). First call with confirm:false — returns the value about to be deleted. Show it to the user, ask for explicit approval. Second call with confirm:true and the SAME key deletes the row. Returns (confirm:false): { pending:true, action:'delete', key, before, agentInstruction }. Returns (confirm:true): { applied:true, key, message }. If the key doesn't exist, the first call still returns pending:true with before:null so the agent can tell the user 'there's nothing stored under that key'.",
-    input_schema: {
-      type: "object",
-      properties: {
-        key: {
-          type: "string",
-          description: "The stable identifier of the fact to delete.",
-        },
-        confirm: {
-          type: "boolean",
-          description:
-            "Always false on the first call. Set true only after explicit user approval.",
-          default: false,
-        },
-      },
-      required: ["key"],
+      required: ["query"],
     },
   },
 ];
@@ -763,10 +727,16 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
             // without a follow-up tool call. `exampleVideoIds` retained as
             // a derived alias for back-compat (one release of grace).
             formats: formats.map((f) => ({
+              id: f.id,
               template: f.template,
               avgMultiplier: f.avgMultiplier,
               totalViewsMonth: f.totalViewsMonth,
               risingRate: f.risingRate,
+              // T3 follow-up: surfaced so the agent can label
+              // single-channel formats "(author pattern)" in the
+              // structured markdown — these are softer signals than
+              // true cross-channel trends.
+              isSingleChannel: f.isSingleChannel,
               examples: f.examples.map((e) => ({
                 videoId: e.videoId,
                 title: e.title,
@@ -926,142 +896,6 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
             changedFields: Object.keys(cleaned),
             message:
               "Confirm to the user that the update is applied, then offer the next concrete step (e.g. 'I can now run list_outliers grounded in this voice — say the word').",
-          },
-        };
-      }
-      case "save_channel_memory": {
-        const activeId = getActiveChannelId();
-        if (!activeId) {
-          return {
-            ok: false,
-            error:
-              "No active channel — set one from the top-right channel picker before saving memory.",
-          };
-        }
-        const key = typeof input.key === "string" ? input.key.trim() : "";
-        const value =
-          typeof input.value === "string" ? input.value.trim() : "";
-        if (!key) return { ok: false, error: "key required" };
-        if (key.length > 2000) {
-          return { ok: false, error: `key exceeds 2000 char limit` };
-        }
-        if (!value) return { ok: false, error: "value required" };
-        if (value.length > 2000) {
-          return { ok: false, error: `value exceeds 2000 char limit` };
-        }
-        const source =
-          typeof input.source === "string" && input.source.trim().length > 0
-            ? input.source.trim().slice(0, 200)
-            : "chat:save_channel_memory";
-        const confidence =
-          typeof input.confidence === "number" &&
-          Number.isFinite(input.confidence)
-            ? Math.max(0, Math.min(1, input.confidence))
-            : 0.8;
-        const confirm = input.confirm === true;
-        const existing = getChannelMemory(activeId, key);
-        const action: "create" | "update" = existing ? "update" : "create";
-
-        if (!confirm) {
-          const { log: logger } = await import("./logger");
-          logger.debug("chat", "save_channel_memory diff requested", {
-            activeChannelId: activeId,
-            key,
-            action,
-          });
-          return {
-            ok: true,
-            data: {
-              pending: true,
-              action,
-              key,
-              before: existing?.value ?? null,
-              after: value,
-              confidence,
-              source,
-              agentInstruction:
-                "Show the user the proposed memory write: key, before (if updating) → after, and the source/confidence. Ask 'yes' to apply, 'edit' to revise, or 'no' to cancel. After explicit approval, call save_channel_memory AGAIN with the SAME key/value/source/confidence plus confirm:true. Do NOT call with confirm:true until the user has approved.",
-            },
-          };
-        }
-
-        const row = upsertChannelMemory({
-          channelId: activeId,
-          key,
-          value,
-          source,
-          confidence,
-        });
-        const { log: logger } = await import("./logger");
-        logger.info("chat", "save_channel_memory applied", {
-          activeChannelId: activeId,
-          key,
-          action,
-        });
-        return {
-          ok: true,
-          data: {
-            applied: true,
-            action,
-            key,
-            value: row?.value ?? value,
-            message:
-              "Confirm to the user that the memory is saved. Future chats on this channel will see it.",
-          },
-        };
-      }
-      case "forget_channel_memory": {
-        const activeId = getActiveChannelId();
-        if (!activeId) {
-          return {
-            ok: false,
-            error:
-              "No active channel — set one from the top-right channel picker before forgetting memory.",
-          };
-        }
-        const key = typeof input.key === "string" ? input.key.trim() : "";
-        if (!key) return { ok: false, error: "key required" };
-        const confirm = input.confirm === true;
-        const existing = getChannelMemory(activeId, key);
-
-        if (!confirm) {
-          const { log: logger } = await import("./logger");
-          logger.debug("chat", "forget_channel_memory diff requested", {
-            activeChannelId: activeId,
-            key,
-            existed: !!existing,
-          });
-          return {
-            ok: true,
-            data: {
-              pending: true,
-              action: "delete",
-              key,
-              before: existing?.value ?? null,
-              agentInstruction: existing
-                ? "Show the user the fact about to be deleted (key + value). Ask for explicit approval (yes / no). After they say yes, call forget_channel_memory AGAIN with the SAME key plus confirm:true."
-                : "There is nothing stored under this key for the active channel. Tell the user so — no write needed.",
-            },
-          };
-        }
-
-        const removed = deleteChannelMemory(activeId, key);
-        const { log: logger } = await import("./logger");
-        logger.info("chat", "forget_channel_memory applied", {
-          activeChannelId: activeId,
-          key,
-          removed,
-        });
-        return {
-          ok: true,
-          data: {
-            applied: true,
-            action: "delete",
-            key,
-            removed,
-            message: removed
-              ? "Confirm to the user that the fact is forgotten."
-              : "Tell the user there was nothing stored under that key — nothing to delete.",
           },
         };
       }
@@ -1248,6 +1082,22 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
           },
         };
       }
+      case "web_search": {
+        const key = requireKey("exa");
+        const query = String(input.query ?? "").trim();
+        if (!query) return { ok: false, error: "query required" };
+        const numResults = Math.min(
+          10,
+          Math.max(1, Number(input.numResults) || 8)
+        );
+        return {
+          ok: true,
+          data: await exaSearch(query, key, {
+            numResults,
+            includeText: true,
+          }),
+        };
+      }
       default:
         return { ok: false, error: `unknown tool: ${name}` };
     }
@@ -1329,23 +1179,12 @@ export function buildSystemPrompt(
       rules.length > 0 ? rules : "(none set)"
     );
 
-    // Persistent facts — top 5 memory rows by confidence, total ≤1500 chars.
-    const memory = listChannelMemory(channel.id).slice(0, 5);
-    if (memory.length > 0) {
-      lines.push("", "## Persistent facts");
-      let used = 0;
-      for (const m of memory) {
-        const v = m.value.length > 300 ? `${m.value.slice(0, 299)}…` : m.value;
-        const line = `- ${m.key}: ${v}`;
-        if (used + line.length > 1500) break;
-        lines.push(line);
-        used += line.length;
-      }
-    }
-
     // Banned topics — kept as its own H2 so the constraint is impossible
-    // to miss. The agent has to skip these in both conversational and
-    // generate_ideas paths.
+    // to miss. Reads the legacy channel_memory.banned_topics row
+    // (writer removed when the generic memory tools were cut; existing
+    // rows still gate the source pool inside generate_ideas + steer
+    // conversational drift). Ideation Rules covers the new write path.
+    const memory = listChannelMemory(channel.id);
     const bannedRow = memory.find((m) => m.key === "banned_topics");
     if (bannedRow && bannedRow.value.trim().length > 0) {
       const terms = bannedRow.value
@@ -1384,7 +1223,7 @@ export function buildSystemPrompt(
     if (activeGroups.includes("ideation")) {
       lines.push(
         "### Ideation (§1/§2/§4 engine — primary surface)",
-        "list_outliers · list_format_patterns · explain_outlier · generate_ideas · validate_idea · update_channel_context · save_channel_memory · forget_channel_memory · ban_format · unban_format"
+        "list_outliers · list_format_patterns · explain_outlier · generate_ideas · validate_idea · web_search · update_channel_context · ban_format · unban_format"
       );
     }
     if (activeGroups.includes("my_channel")) {
@@ -1403,13 +1242,13 @@ export function buildSystemPrompt(
 
   lines.push(
     "",
-    "## Operating rules (1-14, ALL non-negotiable)",
+    "## Operating rules (1-15, ALL non-negotiable)",
     "1. Always call a tool when one can answer; cite it (\"from list_outliers: …\").",
     "2. Active channel scope is sacred — never aggregate across the user's channels.",
     "3. Ideation flow: list_outliers → optional list_format_patterns → generate_ideas. Don't skip to generate_ideas without the source.",
     "4. \"Why did X work\": list_outliers (or use the videoId from context) → explain_outlier.",
     "5. Don't repeat the same tool+input combination in one turn — the dispatcher rejects duplicates.",
-    "6. Two-step confirm is MANDATORY for every mutating tool (update_channel_context, save_channel_memory, forget_channel_memory, ban_format, unban_format). First call confirm:false returns a proposal; second call confirm:true applies. Show the proposal to the user verbatim, wait for explicit yes. For ban_format/unban_format on template_match: if requires_disambiguation, surface the candidate list and ask the user to pick by format_id BEFORE confirming.",
+    "6. Two-step confirm is MANDATORY for every mutating tool (update_channel_context, ban_format, unban_format). First call confirm:false returns a proposal; second call confirm:true applies. Show the proposal to the user verbatim, wait for explicit yes. For ban_format/unban_format on template_match: if requires_disambiguation, surface the candidate list and ask the user to pick by format_id BEFORE confirming.",
     "7. Performance bands — translate multipliers BEFORE writing the line. ≥5× = \"hit hard\"; 2× to <5× = \"above average\"; 0.8×-<2× = \"average\"; <0.8× = \"underperformed\". Raw multiplier may appear in parentheses, never naked. validation responses already include performanceBand — use VERBATIM.",
     "8. Per MENTOR_METHOD §3, evergreen = cross-channel + cross-time. validate_idea checks YOUR catalog only; the cross-channel §3 check is on you (use list_outliers + competitor data, never a single outlier).",
     `9. You advise on the ${channel?.title ? `"${channel.title}"` : "active"} channel ONLY. Ignore facts/memory from other channels. If asked about a different connected channel, tell the user to switch first.`,
@@ -1417,7 +1256,8 @@ export function buildSystemPrompt(
     "11. Default to TERSE. Show data + visuals + verdict, not prose. Elaborate ONLY when asked (\"why this format\" / \"explain idea N\").",
     "12. Title language MUST be plain. Banned in proposedTitle: cinematic, sensory, visceral, profound, desolate expanse, humanity has ever charted, humanity has ever mapped, inexorable, vastest, the most absolute, physically impossible. Mirror competitor outlier register (\"huge\", \"hiding\", \"hard\", \"real\", \"big\", \"found\", \"moved\"). Server enforces this — slips get one regenerate attempt then drop.",
     "13. The mandatory ideation output format lives in the generate_ideas tool description. Follow it exactly when listing ideas.",
-    "14. If the channel is small/inactive/wrong-niche, say it directly. Honesty over polish."
+    "14. If the channel is small/inactive/wrong-niche, say it directly. Honesty over polish.",
+    "15. When generating ideas and viral_topic candidates from list_outliers are sparse (fewer than 5 topics with ≥3× multiplier in last 14d), call web_search with the channel's niche + 'trending this week' to surface fresh angles. Compose ideas blending those web-sourced topics with the trending formats from list_format_patterns. ALWAYS cite source URLs in the reply when a web result drives a title."
   );
 
   if (opts.advisorEnabled) {

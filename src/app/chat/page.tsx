@@ -26,7 +26,6 @@ import {
   X,
 } from "lucide-react";
 import {
-  AgentMemoryPanel,
   DescriptionEditor,
   IdeationRulesEditor,
 } from "@/components/agent-brain-editors";
@@ -1203,15 +1202,6 @@ function ChatPageInner() {
                       );
                       setBrainSaved("Saved · agent will use this on next message.");
                     }}
-                  />
-                </div>
-                <div>
-                  <AgentMemoryPanel
-                    channelId={activeChannelId}
-                    compact
-                    onSaved={() =>
-                      setBrainSaved("Saved · agent will use this on next message.")
-                    }
                   />
                 </div>
               </>

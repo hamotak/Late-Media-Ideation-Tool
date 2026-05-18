@@ -4438,6 +4438,15 @@ try {
   if (!cols.some((c) => c.name === "banned_at")) {
     db.exec(`ALTER TABLE outlier_formats ADD COLUMN banned_at INTEGER`);
   }
+  // is_single_channel: 1 = format only spans one competitor (came from
+  // the relaxed fallback pass — "author pattern", not a true cross-
+  // channel trend). 0/null = standard cross-channel format. UI badges
+  // single-channel rows; the agent labels them appropriately.
+  if (!cols.some((c) => c.name === "is_single_channel")) {
+    db.exec(
+      `ALTER TABLE outlier_formats ADD COLUMN is_single_channel INTEGER NOT NULL DEFAULT 0`
+    );
+  }
   db.exec(
     `CREATE INDEX IF NOT EXISTS idx_outlier_formats_banned
        ON outlier_formats(user_channel_id, banned_at)`
@@ -4460,6 +4469,11 @@ export type OutlierFormat = {
   // filter via getFormatsForChannel; the chat tool list_format_patterns
   // calls getFormatsForChannel directly too.
   bannedAt: number | null;
+  // T3 (diag pass): true when the format only spans one competitor
+  // (came from the relaxed fallback in extractFormatsFromOutliers).
+  // UI badges these "author pattern"; the agent labels them in chat
+  // output. NEVER counted as a cross-channel trend.
+  isSingleChannel: boolean;
 };
 
 /**
@@ -4475,25 +4489,29 @@ export function upsertOutlierFormat(input: {
   totalViewsMonth: number | null;
   risingRate: number | null;
   model: string | null;
+  isSingleChannel?: boolean;
 }): number {
+  const singleChannelFlag = input.isSingleChannel ? 1 : 0;
   db.prepare(
     `INSERT INTO outlier_formats
        (user_channel_id, template, avg_multiplier, total_views_month,
-        rising_rate, extracted_at, model)
-     VALUES (?, ?, ?, ?, ?, strftime('%s','now'), ?)
+        rising_rate, extracted_at, model, is_single_channel)
+     VALUES (?, ?, ?, ?, ?, strftime('%s','now'), ?, ?)
      ON CONFLICT(user_channel_id, template) DO UPDATE SET
        avg_multiplier = excluded.avg_multiplier,
        total_views_month = excluded.total_views_month,
        rising_rate = excluded.rising_rate,
        extracted_at = strftime('%s','now'),
-       model = excluded.model`
+       model = excluded.model,
+       is_single_channel = excluded.is_single_channel`
   ).run(
     input.userChannelId,
     input.template,
     input.avgMultiplier,
     input.totalViewsMonth,
     input.risingRate,
-    input.model
+    input.model,
+    singleChannelFlag
   );
   const row = db
     .prepare(
@@ -4569,7 +4587,8 @@ export function listFormatsForChannel(
   const rows = db
     .prepare(
       `SELECT id, user_channel_id, template, avg_multiplier,
-              total_views_month, rising_rate, extracted_at, model, banned_at
+              total_views_month, rising_rate, extracted_at, model, banned_at,
+              is_single_channel
        FROM outlier_formats
        WHERE user_channel_id = ?
          AND banned_at IS NULL
@@ -4586,6 +4605,7 @@ export function listFormatsForChannel(
     extracted_at: number;
     model: string | null;
     banned_at: number | null;
+    is_single_channel: number;
   }>;
   return rows.map((r) => ({
     id: r.id,
@@ -4597,6 +4617,7 @@ export function listFormatsForChannel(
     extractedAt: r.extracted_at,
     model: r.model,
     bannedAt: r.banned_at,
+    isSingleChannel: r.is_single_channel === 1,
   }));
 }
 
@@ -4641,7 +4662,8 @@ export function getOutlierFormatById(
   const r = db
     .prepare(
       `SELECT id, user_channel_id, template, avg_multiplier,
-              total_views_month, rising_rate, extracted_at, model, banned_at
+              total_views_month, rising_rate, extracted_at, model, banned_at,
+              is_single_channel
        FROM outlier_formats
        WHERE id = ?`
     )
@@ -4656,6 +4678,7 @@ export function getOutlierFormatById(
         extracted_at: number;
         model: string | null;
         banned_at: number | null;
+        is_single_channel: number;
       }
     | undefined;
   if (!r) return null;
@@ -4669,6 +4692,7 @@ export function getOutlierFormatById(
     extractedAt: r.extracted_at,
     model: r.model,
     bannedAt: r.banned_at,
+    isSingleChannel: r.is_single_channel === 1,
   };
 }
 
@@ -4690,7 +4714,8 @@ export function findOutlierFormatsByTemplateMatch(
   const rows = db
     .prepare(
       `SELECT id, user_channel_id, template, avg_multiplier,
-              total_views_month, rising_rate, extracted_at, model, banned_at
+              total_views_month, rising_rate, extracted_at, model, banned_at,
+              is_single_channel
        FROM outlier_formats
        WHERE user_channel_id = ?
          AND LOWER(template) LIKE LOWER(?)
@@ -4707,6 +4732,7 @@ export function findOutlierFormatsByTemplateMatch(
     extracted_at: number;
     model: string | null;
     banned_at: number | null;
+    is_single_channel: number;
   }>;
   return rows.map((r) => ({
     id: r.id,
@@ -4718,6 +4744,7 @@ export function findOutlierFormatsByTemplateMatch(
     extractedAt: r.extracted_at,
     model: r.model,
     bannedAt: r.banned_at,
+    isSingleChannel: r.is_single_channel === 1,
   }));
 }
 
