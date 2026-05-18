@@ -2,45 +2,24 @@ import "server-only";
 import type Anthropic from "@anthropic-ai/sdk";
 import {
   banOutlierFormat,
-  competitorGapAnalysis,
   deleteChannelMemory,
   findOutlierFormatsByTemplateMatch,
   getActiveChannelId,
   getChannel,
   getChannelMemory,
-  getComment,
-  getCommentAnalysis,
   getIntegration,
   getOutlierFormatById,
   getSetting,
-  getTranscript,
   listAllChannels,
   listChannelMemory,
   listCompetitorAlerts,
-  listCompetitors,
-  listReplies,
-  listTopLevelComments,
   listVideos,
   searchComments,
   searchTranscripts,
-  recordDeepgramUsage,
   unbanOutlierFormat,
   upsertChannelMemory,
-  upsertTranscript,
   videoStats,
 } from "./db";
-import {
-  fetchComments,
-  fetchTrending,
-  fetchTranscriptFree,
-  nicheExplorer,
-  searchYouTube,
-  youtubeSuggest,
-} from "./youtube";
-import { exaGetContents, exaSearch } from "./exa";
-import { apifyYouTubeScrape } from "./apify";
-import { transcribeYouTubeVideo } from "./deepgram";
-import { runSelect, SQL_SCHEMA } from "./sql-tool";
 import { extractSection, loadMentorMethod } from "./mentor-method";
 import {
   fetchChannelOverview,
@@ -52,16 +31,20 @@ import {
   type PeriodSpec,
 } from "./yt-analytics";
 import { getOAuthTokens } from "./google-oauth";
+import { log } from "./logger";
 
-/** A tool group the user can enable/disable via the "+" menu in chat. */
-export type ToolGroup =
-  | "youtube"
-  | "exa"
-  | "apify"
-  | "analytics"
-  | "research"
-  | "yt_analytics"
-  | "strategy";
+/**
+ * A tool group the user can enable/disable via the "+" menu in chat.
+ *
+ * The agent's surface was pruned from 6 groups / ~25 tools down to 3
+ * groups / ~18 tools. Cuts (execute_sql, web_*, scrape_*, niche_explorer,
+ * youtube_trending, youtube_suggest, fetch_transcript, get_video_comments,
+ * list_video_comments_cached, get_comment_thread, search_youtube,
+ * get_comment_analysis, list_competitors, competitor_gap_analysis) are
+ * gone from the agent registry but their underlying lib functions remain
+ * exported — backend routes + scheduled jobs still call them.
+ */
+export type ToolGroup = "ideation" | "my_channel" | "studio_analytics";
 
 type Tool = Anthropic.Tool;
 type ToolInput = Record<string, unknown>;
@@ -76,29 +59,33 @@ function requireKey(name: string): string {
 // Tool schemas — what Claude sees
 // ---------------------------------------------------------------------------
 
-const YOUTUBE_TOOLS: Tool[] = [
+// "My Channel" group — local-DB read-only tools scoped to the active
+// channel. No live YouTube API quota, no Apify, no Deepgram, no Exa.
+// Just the four indispensable channel-introspection helpers the agent
+// reaches for when the user asks about their own content.
+const MY_CHANNEL_TOOLS: Tool[] = [
   {
     name: "channel_summary",
     description:
-      "Return overall stats for the user's bound YouTube channel: title, subscribers, total views, videos, average views/likes/comments across imported videos. Use this first when the user asks about 'my channel'.",
+      "Stats for the active channel: title, subscribers, total views, videos imported, averages.",
     input_schema: { type: "object", properties: {}, required: [] },
   },
   {
     name: "list_my_videos",
     description:
-      "List the user's own imported videos from local DB, sorted by recent publish date. Optionally filter by text search across title/description. Returns id, title, views, likes, comments, duration, publishedAt.",
+      "List the active channel's imported videos by recent publish date. Optional keyword filter.",
     input_schema: {
       type: "object",
       properties: {
-        search: { type: "string", description: "Optional keyword filter." },
-        limit: { type: "number", description: "Default 50, max 200.", default: 50 },
+        search: { type: "string" },
+        limit: { type: "number", default: 50, maximum: 200 },
       },
     },
   },
   {
     name: "search_my_transcripts",
     description:
-      "Full-text search across transcripts of the user's own videos. Use when the user asks what they said about a topic, or to find which videos discuss something.",
+      "Full-text search across the active channel's transcripts. Use when asked what was said about X.",
     input_schema: {
       type: "object",
       properties: { query: { type: "string" } },
@@ -106,36 +93,9 @@ const YOUTUBE_TOOLS: Tool[] = [
     },
   },
   {
-    name: "get_video_comments",
-    description:
-      "Fetch top-level YouTube comments for a video by ID. Use to analyze audience reaction / sentiment. Costs 1 YouTube API unit per ~100 comments.",
-    input_schema: {
-      type: "object",
-      properties: {
-        videoId: { type: "string", description: "YouTube video ID (11 chars)." },
-        max: { type: "number", default: 50 },
-      },
-      required: ["videoId"],
-    },
-  },
-  {
-    name: "list_video_comments_cached",
-    description:
-      "Return top-level comments for one of the USER'S OWN videos from the local cache (already synced via the UI). Prefer this over `get_video_comments` when the user asks about their own video — it's instant and costs no API quota. Each comment has reply_count; call `get_comment_thread` to read replies.",
-    input_schema: {
-      type: "object",
-      properties: {
-        videoId: { type: "string" },
-        limit: { type: "number", default: 50, maximum: 200 },
-        offset: { type: "number", default: 0 },
-      },
-      required: ["videoId"],
-    },
-  },
-  {
     name: "search_my_comments",
     description:
-      "Full-text search across ALL cached comments on the user's videos (FTS5). Use for audience-sentiment questions like \"what do people say about X\", \"who mentioned sponsorship\", \"complaints about audio quality\". Returns comment text + author + like_count + video_id + video_title. No API quota.",
+      "Full-text FTS5 search across cached comments on the active channel's videos. Use for audience-sentiment questions. No API quota.",
     input_schema: {
       type: "object",
       properties: {
@@ -143,175 +103,6 @@ const YOUTUBE_TOOLS: Tool[] = [
         limit: { type: "number", default: 20, maximum: 100 },
       },
       required: ["query"],
-    },
-  },
-  {
-    name: "get_comment_thread",
-    description:
-      "Fetch a single top-level comment plus all its cached replies from the local cache. Use after `search_my_comments` or `list_video_comments_cached` to read the full discussion under a specific comment.",
-    input_schema: {
-      type: "object",
-      properties: {
-        commentId: { type: "string" },
-      },
-      required: ["commentId"],
-    },
-  },
-  {
-    name: "search_youtube",
-    description:
-      "Search public YouTube for videos or channels matching a query. Costs 100 YouTube API units — use sparingly. Returns titles, channels, IDs.",
-    input_schema: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        type: { type: "string", enum: ["video", "channel"], default: "video" },
-        maxResults: { type: "number", default: 10 },
-      },
-      required: ["query"],
-    },
-  },
-];
-
-const EXA_TOOLS: Tool[] = [
-  {
-    name: "web_search",
-    description:
-      "Semantic web search via Exa AI. Use for research, trends, news, competitor intel, industry data. Returns titles, URLs, and (if requested) text snippets.",
-    input_schema: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        numResults: { type: "number", default: 8 },
-        includeText: {
-          type: "boolean",
-          default: true,
-          description: "Include text snippets from each page.",
-        },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "web_fetch",
-    description: "Fetch cleaned readable text of specific URLs via Exa. Use after web_search to drill into promising results.",
-    input_schema: {
-      type: "object",
-      properties: {
-        urls: { type: "array", items: { type: "string" }, maxItems: 5 },
-      },
-      required: ["urls"],
-    },
-  },
-];
-
-const ANALYTICS_TOOLS: Tool[] = [
-  {
-    name: "execute_sql",
-    description:
-      `Run a **read-only** SELECT against the local SQLite database. Use this for statistical / structured analysis of the user's videos (averages, correlations, bucketing by month, tag analysis, outlier detection). Returns up to 200 rows.\n\nSchema:\n${SQL_SCHEMA}`,
-    input_schema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "A single SELECT/WITH statement." },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "youtube_trending",
-    description:
-      "List what's trending on YouTube right now by region. Useful to spot format patterns and hot topics. Free (1 YouTube API unit).",
-    input_schema: {
-      type: "object",
-      properties: {
-        regionCode: { type: "string", description: "ISO 3166-1 alpha-2 (US, UA, GB, ...)", default: "US" },
-        categoryId: { type: "string", description: "Optional YT videoCategoryId." },
-        maxResults: { type: "number", default: 25, maximum: 50 },
-      },
-    },
-  },
-  {
-    name: "niche_explorer",
-    description:
-      "Given a topic/niche phrase, returns the top-5 channels by subscribers and top-10 outlier videos (highest views in the last 6 months). Costs ~200 YouTube API units — use once per niche question.",
-    input_schema: {
-      type: "object",
-      properties: {
-        topic: { type: "string" },
-        maxChannels: { type: "number", default: 5, maximum: 10 },
-      },
-      required: ["topic"],
-    },
-  },
-  {
-    name: "fetch_transcript",
-    description:
-      "Fetch the transcript of a YouTube video (any public video with captions — manual or auto). Free, no API key. Caches result in local DB if the video is already known.",
-    input_schema: {
-      type: "object",
-      properties: {
-        videoId: { type: "string", description: "YouTube 11-char video ID." },
-        lang: { type: "string", description: "Preferred language code (en, uk, ...)" },
-      },
-      required: ["videoId"],
-    },
-  },
-];
-
-const RESEARCH_TOOLS: Tool[] = [
-  {
-    name: "youtube_suggest",
-    description:
-      "YouTube search autocomplete — returns what YouTube users actually type when searching for a seed query. Perfect for discovering long-tail topic ideas and content gaps. Free, no API key.",
-    input_schema: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        hl: { type: "string", description: "Language (en, uk, ...)", default: "en" },
-        gl: { type: "string", description: "Country code (US, UA, ...)" },
-      },
-      required: ["query"],
-    },
-  },
-  // NOTE: `google_trends_interest` + `google_trends_related` were removed —
-  // the underlying Apify actor hits Google Trends without an official API,
-  // and Google returns 429 against Apify's datacenter IPs essentially all
-  // the time. The tool was burning research iterations on guaranteed
-  // failures. `youtube_suggest` (autocomplete) covers real search demand
-  // well enough as a substitute signal. The `./trends.ts` library is
-  // intentionally left in the repo in case we bring it back via residential
-  // proxies or a different provider.
-];
-
-const APIFY_TOOLS: Tool[] = [
-  {
-    name: "scrape_youtube_channel",
-    description:
-      "Use Apify to scrape a YouTube channel (usually a competitor, not the user's own channel). Returns up to `maxResults` videos with title, views, likes, duration, comment count, and optionally transcripts. Slower and more expensive than the YouTube API, but bypasses quota and can fetch transcripts.",
-    input_schema: {
-      type: "object",
-      properties: {
-        channelUrl: {
-          type: "string",
-          description: "Channel URL like https://www.youtube.com/@handle or /channel/UC...",
-        },
-        maxResults: { type: "number", default: 20, maximum: 100 },
-        includeTranscript: { type: "boolean", default: false },
-      },
-      required: ["channelUrl"],
-    },
-  },
-  {
-    name: "get_youtube_transcript",
-    description:
-      "Transcribe one or more YouTube videos via Deepgram (yt-dlp pulls audio locally, streams to Deepgram). Caches results into the local transcripts DB. Costs ≈$0.0043/min against the user's Deepgram credit.",
-    input_schema: {
-      type: "object",
-      properties: {
-        videoUrls: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 10 },
-      },
-      required: ["videoUrls"],
     },
   },
 ];
@@ -328,7 +119,7 @@ const APIFY_TOOLS: Tool[] = [
 
 const PERIOD_ENUM = ["7d", "28d", "90d", "365d", "all"] as const;
 
-const YT_ANALYTICS_TOOLS: Tool[] = [
+const STUDIO_ANALYTICS_TOOLS: Tool[] = [
   {
     name: "get_channel_analytics_overview",
     description:
@@ -410,35 +201,11 @@ const YT_ANALYTICS_TOOLS: Tool[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Strategy tools — every Phase D / B dataset, exposed read-only so chat can
-// reason about the user's channel the same way the dashboards do.
+// Ideation tools — the §1/§2/§4 engine. Outlier discovery → format extraction
+// → idea composition. Plus the durable-state tools (channel context, memory,
+// format bans) the agent uses to capture HAmo's preferences across sessions.
 // ---------------------------------------------------------------------------
-const STRATEGY_TOOLS: Tool[] = [
-  {
-    name: "list_competitors",
-    description:
-      "List the user's tracked competitor channels with their subs, video counts, and last sync time. Use whenever the user asks who they're tracking, or wants channel-by-channel competitor stats.",
-    input_schema: { type: "object", properties: {}, required: [] },
-  },
-  {
-    name: "competitor_gap_analysis",
-    description:
-      "Find title keywords frequent in competitors' top videos that the user has NEVER used. Returns words ranked by aggregate competitor views, with usage frequency and example titles. Use when the user wants ideas grounded in proven competitor formulas.",
-    input_schema: {
-      type: "object",
-      properties: { topN: { type: "number", default: 25 } },
-    },
-  },
-  {
-    name: "get_comment_analysis",
-    description:
-      "Return the cached AI audience analysis for one video — sentiment 1-10, top themes, credibility objections, future-video ideas, standout quote candidates. Returns 'no analysis yet' if the user hasn't run it; tell them to open the Comments tab and click 'Analyse with AI'.",
-    input_schema: {
-      type: "object",
-      properties: { videoId: { type: "string" } },
-      required: ["videoId"],
-    },
-  },
+const IDEATION_TOOLS: Tool[] = [
   {
     name: "list_outliers",
     description:
@@ -474,8 +241,43 @@ const STRATEGY_TOOLS: Tool[] = [
   },
   {
     name: "generate_ideas",
-    description:
-      "Compose up to 10 new YouTube video ideas. OUTLIERS-PRIMARY pipeline: (1) server pulls top 30 competitor outliers ≥1.5× channel median in last 28d (the PRIMARY inspiration); (2) server pulls top 5 trending formats by rising rate as OPTIONAL remix templates (may be empty); (3) Claude composes 1 idea per outlier — for ~40% it MAY use a format template (sourceFormatId set), the remaining ~60% are free-form titles in the channel's voice (sourceFormatId null). When `mode:\"free-form\"` is passed, EVERY idea ships with sourceFormatId null (the format pool is suppressed); (4) server runs drop gates — title length (50-80), banned words (op rule 13), per-channel banned_topics (channel_memory substring match — applied PRE-LLM on the outlier pool and POST-LLM on titles), topic-frequency (≥1 hit in last 20 own-channel uploads), originality (≤45% token overlap), topic-cluster dedup (10 distinct topics across 10 ideas). Drops surface in `dropped: [{topicLabel, proposedTitle, reason, detail}]`. Each surviving idea includes: sourceFormat ({id,template,risingRate,exampleCount}) OR null, sourceTopicOutliers (1-3 with multiplier + thumbnailUrl + performanceBand + competitorTitle/Handle), topicSimilarOutliers (up to 3 cross-channel topic siblings, empty when none), topicLabel, proposedTitle, angle, confidence, originalityScore, validation, titleLengthBand, topicFrequencyCheck. Top-level also returns `bannedTopics: string[]` (the parsed channel_memory row) so the agent can cite it.",
+    description: [
+      "Compose up to 10 new YouTube video ideas. OUTLIERS-PRIMARY pipeline: server pulls top 30 competitor outliers ≥1.5× channel median in last 28d (PRIMARY inspiration) + top 5 trending formats (OPTIONAL remix templates, may be empty). Claude composes 1 idea per outlier; ~40% remix with a format (sourceFormat set), ~60% are free-form (sourceFormat null). Pass mode:\"free-form\" to force every idea to sourceFormat:null. Server drops via: length 50-80, banned words (op rule 13), per-channel banned_topics, topic-frequency (≥1 in last 20 own uploads), originality (≤45% overlap), topic-cluster dedup. Drops returned in `dropped[]`.",
+      "",
+      "Each surviving idea has: sourceFormat ({id,template,risingRate,exampleCount}) | null, sourceTopicOutliers (1-3 with multiplier+thumbnailUrl+performanceBand+competitorTitle/Handle), topicSimilarOutliers (up to 3 cross-channel topic siblings — empty when none), topicLabel, proposedTitle, angle, confidence, validation, titleLengthBand. Top-level also returns bannedTopics:string[].",
+      "",
+      "## OUTPUT FORMAT (MANDATORY when you present ideas in chat)",
+      "Open with a pre-ideation research block, then list each idea in this exact terse markdown structure, then close with a one-sentence Next step. NO prose paragraphs anywhere. NO 'Why this format works'. NO levers row.",
+      "",
+      "Pre-ideation research block (output FIRST):",
+      "**Pattern research (last 28d):**",
+      "- Working: {3-5 themes from list_outliers/list_format_patterns — viral ≥3×, plain language, ≤8 words each}",
+      "- Not working: {topics with ≥2 underperformers in last 20 own uploads — pull from validate_idea matchedVideos where performanceBand='underperformed', ≤8 words each}",
+      "- Skipped: {banned topics from bannedTopics + drops from dropped[] where reason='topic_overused'. Cite term + count.}",
+      "Rules: bullets only, ≤5 items per bullet group, ≤8 words each. OMIT a line if its group is empty (don't print 'Working: (none)').",
+      "",
+      "Then each numbered idea — EXACTLY this markdown shape:",
+      "### {n}. {proposedTitle}",
+      "",
+      "[![]({sourceOutlier.thumbnailUrl})](https://www.youtube.com/watch?v={sourceOutlier.videoId}) **Inspired by:** [{sourceOutlier.competitorTitle} — {sourceOutlier.title}](https://www.youtube.com/watch?v={sourceOutlier.videoId}) · {performanceBand} ({multiplier}×)",
+      "",
+      "**Same topic across competitors:** (OMIT this entire block when topicSimilarOutliers is empty)",
+      "- [![](thumbnail)](url) [competitorTitle — title](url) · performanceBand (multiplier×)",
+      "",
+      "**Format:** `{template}` · rising {risingRate}    (OMIT this entire line when sourceFormat is null)",
+      "",
+      "{catalogEmoji} {catalogVerdictShort}",
+      "",
+      "---",
+      "",
+      "catalogEmoji + catalogVerdictShort map from validation.verdict:",
+      "  fresh → ✅ Fresh territory  |  covered_old → ⚠️ Touched 60-90d ago, none since",
+      "  covered_recently → 🛑 Covered recently, would compete  |  covered_underperformed → 🟠 Recent flop — fresh angle needed",
+      "",
+      "After ALL ideas: **Next step this week:** {one sentence — pick ONE idea and why}. One sentence. No follow-up paragraph.",
+      "Elaborate ONLY when the user explicitly asks ('why this format' / 'explain idea N' / 'tell me more'). Default = terse.",
+      "Never strip the structure to save tokens.",
+    ].join("\n"),
     input_schema: {
       type: "object",
       properties: {
@@ -685,13 +487,9 @@ const STRATEGY_TOOLS: Tool[] = [
 export function getToolsFor(groups: ToolGroup[]): Tool[] {
   const set = new Set(groups);
   const tools: Tool[] = [];
-  if (set.has("youtube")) tools.push(...YOUTUBE_TOOLS);
-  if (set.has("analytics")) tools.push(...ANALYTICS_TOOLS);
-  if (set.has("research")) tools.push(...RESEARCH_TOOLS);
-  if (set.has("exa")) tools.push(...EXA_TOOLS);
-  if (set.has("apify")) tools.push(...APIFY_TOOLS);
-  if (set.has("yt_analytics")) tools.push(...YT_ANALYTICS_TOOLS);
-  if (set.has("strategy")) tools.push(...STRATEGY_TOOLS);
+  if (set.has("ideation")) tools.push(...IDEATION_TOOLS);
+  if (set.has("my_channel")) tools.push(...MY_CHANNEL_TOOLS);
+  if (set.has("studio_analytics")) tools.push(...STUDIO_ANALYTICS_TOOLS);
   return tools;
 }
 
@@ -731,31 +529,6 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
         if (!q) return { ok: false, error: "query required" };
         return { ok: true, data: searchTranscripts(q, 20) };
       }
-      case "get_video_comments": {
-        const key = requireKey("youtube");
-        const videoId = String(input.videoId ?? "").trim();
-        const max = Math.min(500, Math.max(1, Number(input.max) || 50));
-        if (!videoId) return { ok: false, error: "videoId required" };
-        return { ok: true, data: await fetchComments(videoId, key, max) };
-      }
-      case "list_video_comments_cached": {
-        const videoId = String(input.videoId ?? "").trim();
-        if (!videoId) return { ok: false, error: "videoId required" };
-        const limit = Math.min(200, Math.max(1, Number(input.limit) || 50));
-        const offset = Math.max(0, Number(input.offset) || 0);
-        const rows = listTopLevelComments(videoId, limit, offset);
-        return {
-          ok: true,
-          data: rows.map((c) => ({
-            id: c.id,
-            author: c.author,
-            text: c.text,
-            likes: c.like_count,
-            replyCount: c.reply_count,
-            publishedAt: c.published_at,
-          })),
-        };
-      }
       case "search_my_comments": {
         const q = String(input.query ?? "").trim();
         if (!q) return { ok: false, error: "query required" };
@@ -767,7 +540,6 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
             id: c.id,
             videoId: c.video_id,
             videoTitle: c.video_title,
-            parentId: c.parent_id,
             author: c.author,
             text: c.text,
             likes: c.like_count,
@@ -776,206 +548,8 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
           })),
         };
       }
-      case "get_comment_thread": {
-        const commentId = String(input.commentId ?? "").trim();
-        if (!commentId) return { ok: false, error: "commentId required" };
-        const top = getComment(commentId);
-        if (!top) return { ok: false, error: "comment not found in cache" };
-        // If caller passed a reply id, resolve the actual parent.
-        const parent = top.parent_id ? getComment(top.parent_id) ?? top : top;
-        const replies = listReplies(parent.id);
-        return {
-          ok: true,
-          data: {
-            parent: {
-              id: parent.id,
-              videoId: parent.video_id,
-              author: parent.author,
-              text: parent.text,
-              likes: parent.like_count,
-              replyCount: parent.reply_count,
-              publishedAt: parent.published_at,
-            },
-            replies: replies.map((r) => ({
-              id: r.id,
-              author: r.author,
-              text: r.text,
-              likes: r.like_count,
-              publishedAt: r.published_at,
-            })),
-          },
-        };
-      }
-      case "search_youtube": {
-        const key = requireKey("youtube");
-        const query = String(input.query ?? "").trim();
-        if (!query) return { ok: false, error: "query required" };
-        const type = (input.type === "channel" ? "channel" : "video") as "video" | "channel";
-        const maxResults = Math.min(25, Math.max(1, Number(input.maxResults) || 10));
-        return { ok: true, data: await searchYouTube(query, key, { type, maxResults }) };
-      }
-      case "web_search": {
-        const key = requireKey("exa");
-        const query = String(input.query ?? "").trim();
-        if (!query) return { ok: false, error: "query required" };
-        const numResults = Math.min(20, Math.max(1, Number(input.numResults) || 8));
-        const includeText = input.includeText !== false;
-        return {
-          ok: true,
-          data: await exaSearch(query, key, { numResults, includeText }),
-        };
-      }
-      case "web_fetch": {
-        const key = requireKey("exa");
-        const urls = Array.isArray(input.urls)
-          ? (input.urls as unknown[]).filter((u): u is string => typeof u === "string").slice(0, 5)
-          : [];
-        if (!urls.length) return { ok: false, error: "urls required" };
-        return { ok: true, data: await exaGetContents(urls, key) };
-      }
-      case "scrape_youtube_channel": {
-        const key = requireKey("apify");
-        const channelUrl = String(input.channelUrl ?? "").trim();
-        if (!channelUrl) return { ok: false, error: "channelUrl required" };
-        const maxResults = Math.min(100, Math.max(1, Number(input.maxResults) || 20));
-        const includeTranscript = !!input.includeTranscript;
-        return {
-          ok: true,
-          data: await apifyYouTubeScrape(
-            { startUrls: [{ url: channelUrl }], maxResults, includeTranscript },
-            key
-          ),
-        };
-      }
-      case "execute_sql": {
-        const query = String(input.query ?? "").trim();
-        if (!query) return { ok: false, error: "query required" };
-        const result = runSelect(query, 200);
-        // Convert to array of objects for readability
-        const { columns, rows } = result;
-        const objects = rows.map((r) => {
-          const obj: Record<string, unknown> = {};
-          columns.forEach((c, i) => {
-            obj[c] = r[i];
-          });
-          return obj;
-        });
-        return { ok: true, data: { columns, rowCount: rows.length, rows: objects } };
-      }
-      case "youtube_trending": {
-        const key = requireKey("youtube");
-        const regionCode = typeof input.regionCode === "string" ? input.regionCode : "US";
-        const categoryId = typeof input.categoryId === "string" ? input.categoryId : undefined;
-        const maxResults = Math.min(50, Math.max(1, Number(input.maxResults) || 25));
-        const vids = await fetchTrending(key, { regionCode, categoryId, maxResults });
-        // Return compact shape
-        return {
-          ok: true,
-          data: vids.map((v) => ({
-            id: v.id,
-            title: v.title,
-            channel: v.channelId,
-            views: v.views,
-            likes: v.likes,
-            duration: v.durationSeconds,
-            publishedAt: v.publishedAt,
-            tags: v.tags.slice(0, 6),
-          })),
-        };
-      }
-      case "niche_explorer": {
-        const key = requireKey("youtube");
-        const topic = String(input.topic ?? "").trim();
-        if (!topic) return { ok: false, error: "topic required" };
-        const maxChannels = Math.min(10, Math.max(1, Number(input.maxChannels) || 5));
-        return {
-          ok: true,
-          data: await nicheExplorer(topic, key, { maxChannels }),
-        };
-      }
-      case "fetch_transcript": {
-        const videoId = String(input.videoId ?? "").trim();
-        if (!videoId) return { ok: false, error: "videoId required" };
-        const lang = typeof input.lang === "string" ? input.lang : undefined;
-        const cached = getTranscript(videoId);
-        if (cached) {
-          return {
-            ok: true,
-            data: { videoId, language: cached.language, text: cached.text.slice(0, 20_000), cached: true },
-          };
-        }
-        const t = await fetchTranscriptFree(videoId, { lang });
-        if (!t) return { ok: false, error: "no transcript available" };
-        upsertTranscript(videoId, t.text, t.language);
-        return {
-          ok: true,
-          data: { videoId, language: t.language, text: t.text.slice(0, 20_000), cached: false },
-        };
-      }
-      case "youtube_suggest": {
-        const query = String(input.query ?? "").trim();
-        if (!query) return { ok: false, error: "query required" };
-        const hl = typeof input.hl === "string" ? input.hl : "en";
-        const gl = typeof input.gl === "string" ? input.gl : undefined;
-        return { ok: true, data: await youtubeSuggest(query, { hl, gl }) };
-      }
-      // google_trends_* cases removed — the underlying scraper consistently
-      // returns 429 and the tools aren't exposed to Claude anymore.
-      case "get_youtube_transcript": {
-        const key = requireKey("deepgram");
-        const urls = Array.isArray(input.videoUrls)
-          ? (input.videoUrls as unknown[]).filter((u): u is string => typeof u === "string").slice(0, 10)
-          : [];
-        if (!urls.length) return { ok: false, error: "videoUrls required" };
-        // Extract the 11-char videoId from each URL and run Deepgram on
-        // each in series. Sequential rather than parallel because (a)
-        // yt-dlp + Deepgram per video is bursty CPU/network and we'd
-        // rather not slam the local machine, and (b) Deepgram pre-recorded
-        // tier limits concurrent jobs anyway.
-        const results: Array<{
-          url: string;
-          videoId: string | null;
-          transcript: string;
-          language: string | null;
-          error?: string;
-        }> = [];
-        for (const url of urls) {
-          const m = /(?:youtu\.be\/|v=)([A-Za-z0-9_-]{11})/.exec(url);
-          const videoId = m ? m[1] : null;
-          if (!videoId) {
-            results.push({ url, videoId: null, transcript: "", language: null, error: "could not extract videoId from URL" });
-            continue;
-          }
-          // Serve from cache if we already have it — same DB the UI uses.
-          const cached = getTranscript(videoId);
-          if (cached) {
-            results.push({ url, videoId, transcript: cached.text, language: cached.language });
-            continue;
-          }
-          try {
-            const r = await transcribeYouTubeVideo(videoId, key);
-            upsertTranscript(videoId, r.text, r.language);
-            recordDeepgramUsage({
-              videoId,
-              durationSeconds: r.durationSeconds,
-              costCents: r.costCents,
-              model: r.model,
-            });
-            results.push({ url, videoId, transcript: r.text, language: r.language });
-          } catch (err) {
-            results.push({
-              url,
-              videoId,
-              transcript: "",
-              language: null,
-              error: err instanceof Error ? err.message : "transcription failed",
-            });
-          }
-        }
-        return { ok: true, data: results };
-      }
 
-      // ===== YouTube Analytics tools (Phase 6) =====
+      // ===== Studio Analytics (YouTube Analytics OAuth) =====
       // All four share the same pre-flight check: must be connected to
       // Google OAuth. We skip calling the wrapper if there's no token,
       // because the wrapper would throw a less helpful error.
@@ -1040,74 +614,7 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
         }
       }
 
-      // ===== Strategy tools (Phase D / E) =====
-      // All three competitor tools scope to the user's currently-active
-      // channel — competitors now belong to one of the user's channels,
-      // not the global app. Without active scoping, Claude would see
-      // every channel's competitors mixed together.
-      case "list_competitors": {
-        const activeId = getActiveChannelId() ?? undefined;
-        const competitors = listCompetitors(activeId);
-        return {
-          ok: true,
-          data: competitors.map((c) => ({
-            id: c.id,
-            handle: c.handle,
-            title: c.title,
-            channelId: c.channel_id,
-            subscribers: c.subscriber_count,
-            videoCount: c.video_count,
-            tier: c.tier,
-            userChannelId: c.user_channel_id,
-            lastSyncAt: c.last_sync_at,
-          })),
-        };
-      }
-      case "competitor_gap_analysis": {
-        const topN = Math.min(50, Math.max(5, Number(input.topN) || 25));
-        // competitorGapAnalysis already falls back to getActiveChannelId
-        // internally; explicit pass-through keeps the call site grep-able.
-        return {
-          ok: true,
-          data: competitorGapAnalysis({
-            topN,
-            userChannelId: getActiveChannelId(),
-          }),
-        };
-      }
-      case "get_comment_analysis": {
-        const videoId = String(input.videoId ?? "").trim();
-        if (!videoId) return { ok: false, error: "videoId required" };
-        const a = getCommentAnalysis(videoId);
-        if (!a) {
-          return {
-            ok: false,
-            error:
-              "No comment analysis cached for this video. Open the Comments tab and click 'Analyse with AI' first.",
-          };
-        }
-        const safe = <T,>(s: string | null, fb: T): T => {
-          if (!s) return fb;
-          try {
-            return JSON.parse(s) as T;
-          } catch {
-            return fb;
-          }
-        };
-        return {
-          ok: true,
-          data: {
-            sentimentScore: a.sentiment_score,
-            themes: safe(a.themes, [] as string[]),
-            objections: safe(a.objections, [] as unknown[]),
-            futureIdeas: safe(a.future_ideas, [] as unknown[]),
-            hookCandidates: safe(a.hook_candidates, [] as unknown[]),
-            summary: a.summary,
-            analyzedAt: a.analyzed_at,
-            commentsCount: a.comments_count,
-          },
-        };
-      }
+      // ===== Ideation tools (the §1/§2/§4 engine) =====
       case "list_outliers": {
         const limit = Math.min(200, Math.max(1, Number(input.limit) || 50));
         const recentOnly = !!input.recent_only;
@@ -1755,373 +1262,193 @@ export async function runTool(name: string, input: ToolInput): Promise<ToolResul
 // System prompt (context-aware)
 // ---------------------------------------------------------------------------
 
+// One-shot diagnostic — logged the first time buildSystemPrompt runs per
+// process boot. Surfaces the system-prompt size to dev-server logs so
+// HAmo can see we held the post-T4 budget (<8000 chars).
+let promptSizeDiagLogged = false;
+
 export function buildSystemPrompt(
   activeGroups: ToolGroup[],
   opts: { advisorEnabled?: boolean } = {}
 ): string {
   const channel = getChannel();
   const bound = getSetting("youtube.channelId");
-  // Pull the full list of connected channels too — when the user has
-  // more than one, we have to make it crystal clear which one is
-  // currently active, otherwise Claude has historically confused them.
   const allChannels = listAllChannels();
 
-  // Methodology quotes — load once per request. MENTOR_METHOD.md lives
-  // at the project root and is small (<10KB), so the cached read is
-  // free. If the file ever moves the helpers fall back to empty strings
-  // and the prompt still functions (just with less context).
-  const md = loadMentorMethod();
-  const sec1 = extractSection(md, 1);
-  const sec2 = extractSection(md, 2);
-  const sec4 = extractSection(md, 4);
-  const sec7 = extractSection(md, 7);
-  const sec9 = extractSection(md, 9);
+  // The MENTOR_METHOD module is loaded for the ban-checker substring
+  // helper and for the format-extraction prompt; the chat agent itself
+  // doesn't need verbatim quotes any more. Each section's ESSENCE is
+  // baked into the operating rules + tool descriptions below — re-quoting
+  // 8000 chars per turn paid no signal for the cost.
+  void loadMentorMethod;
+  void extractSection;
+
+  // Cap per-field channel context so a verbose niche/positioning paragraph
+  // doesn't blow the prompt budget. /channel-info already caps at 2000
+  // chars per field, but rendering ALL six fields per turn means a
+  // verbose channel can still emit 12k chars — clamp each to 200 here.
+  const CTX_CAP = 200;
+  const clip = (s: string | undefined): string => {
+    const v = (s ?? "").trim();
+    if (!v) return "";
+    return v.length > CTX_CAP ? `${v.slice(0, CTX_CAP - 1).trimEnd()}…` : v;
+  };
 
   const lines: string[] = [
-    `You are HAmo's central YouTube ideation agent for the Eric YT Channel AI app. Your job: turn channel context, competitor data, and outlier patterns into video ideas that follow the methodology below. Every output must be practical, specific, evidence-cited from tool calls, and grounded in MENTOR_METHOD.md — never speculation.`,
-    ``,
-    `## Mission`,
-    `This app exists to help YouTube channels grow. Every recommendation must name a specific action grounded in data the user can see. If your answer could fit any channel in any niche, you failed — rewrite it with channel-specific evidence.`,
-    ``,
-    `## Quality bar — non-negotiable`,
-    `- **No banal advice.** Forbidden phrases and any paraphrase of them: "post consistently", "optimize your titles", "engage with your audience", "understand your niche", "be authentic", "create quality content", "use SEO", "thumbnails matter". If you catch yourself writing something that sounds like generic creator-coach content, delete it and replace with a data-backed claim.`,
-    `- **Every number must come from a tool call**, not from your training knowledge. If you don't have the number, say so.`,
-    `- **Every recommendation must name a specific action.** Bad: "Try longer videos". Good: "Make a 15-20 min video titled 'X' — your 3 longest videos (>12min) have 2.4× the watch time of your Shorts, and competitor @Y publishes only this format."`,
-    `- **Honesty over polish.** If the channel is small/inactive/wrong-niche, say it directly. Don't soften bad news.`,
-    `- **No preamble.** Don't open with "Great question!" or "Let me analyse…". Go straight to the work.`,
-    ``,
-    `## Methodology — MENTOR_METHOD.md (load-bearing for every reply)`,
-    ``,
-    `### §1 — Competitor mapping (B&S Method)`,
-    sec1 || "(section unavailable)",
-    ``,
-    `### §2 — Outliers (the engine)`,
-    sec2 || "(section unavailable)",
-    ``,
-    `### §4 — Title formats (structural patterns, not literal titles)`,
-    sec4 || "(section unavailable)",
-    ``,
-    `### §7 — Ideation (synthesizing the inputs)`,
-    sec7 || "(section unavailable)",
-    ``,
-    `### §9 — The "what made it work" lever taxonomy`,
-    sec9 || "(section unavailable)",
-    ``,
-    `## User context`,
+    "You are HAmo's YouTube ideation agent. Turn channel context + competitor outliers + extracted formats into ideas grounded in MENTOR_METHOD.md. Evidence-cited from tool calls, never speculation.",
+    "",
+    "## Quality bar",
+    "- No banal coach advice (\"post consistently\", \"optimize titles\", \"engage your audience\"). Replace with a data-backed claim or admit you don't have one.",
+    "- Every number comes from a tool call. Don't invent numbers.",
+    "- Every recommendation names a specific action grounded in the active channel's data.",
+    "- No preamble. Go straight to the work. Default to terse.",
+    "",
+    "## Methodology essence (full text in MENTOR_METHOD.md; quotes available on request)",
+    "- §1 Competitor mapping (B&S Method): tier each tracked channel — Authority / Breakthrough / Adjacent / Far. Authority + Breakthrough sources carry more weight.",
+    "- §2 Outliers: a competitor video ≥2× its own channel's median is the canon definition. ≥1.5× is the alert generation floor.",
+    "- §4 Title formats: structural templates with [Slot] placeholders, not literal titles. A format needs ≥3 examples across ≥2 channels to be 'trending'.",
+    "- §7 Ideation: format × topic. Outliers are the topic source, formats are optional remix skeletons.",
+    "- §9 Levers: curiosity-gap, status-signal, fear, identity, novelty, scale, taboo, urgency. Each idea cites one dominant lever as `angle`.",
+    "",
+    "## Active channel",
   ];
+
   if (channel) {
     lines.push(
-      `- **Active channel** (this is the one every local-DB tool is scoped to right now): "${channel.title ?? "(unknown)"}"${channel.handle ? ` — ${channel.handle}` : ""}, id \`${channel.id}\``,
-      `- Subscribers: ${channel.subscriber_count ?? "?"}, total views: ${channel.view_count ?? "?"}, videos in DB: ${channel.video_count ?? "?"}`,
-      `- When the user says "my channel" they mean THIS one — never another channel from the list below.`
+      `- "${channel.title ?? "(unknown)"}"${channel.handle ? ` — ${channel.handle}` : ""}, id \`${channel.id}\` · ${channel.subscriber_count ?? "?"} subs, ${channel.video_count ?? "?"} videos.`
     );
-    // Per-channel strategic context. These fields live on the channels
-    // table (set via /channel-info) and steer every output the agent
-    // produces — niche framing, voice match, audience fit. When a field
-    // is empty, the LLM is told to either ask or capture-via-tool: the
-    // `update_channel_context` tool is the durable path.
-    const notSet = "(not set — ask the user or call update_channel_context to capture it)";
-    const fmt = (s: string | undefined): string =>
-      typeof s === "string" && s.trim().length > 0 ? s.trim() : notSet;
-    lines.push(
-      `- Niche: ${fmt(channel.niche)}`,
-      `- Positioning: ${fmt(channel.positioning)}`,
-      `- Target audience: ${fmt(channel.audience)}`,
-      `- Voice / tone: ${fmt(channel.voice)}`,
-      `- External sources the creator follows: ${fmt(channel.external_sources)}`,
-      `- When the user describes the channel's niche / audience / voice in natural conversation, call \`update_channel_context\` to propose a diff — do NOT silently note it for later. Capture it durably.`
-    );
+    const niche = clip(channel.niche);
+    const positioning = clip(channel.positioning);
+    const audience = clip(channel.audience);
+    const voice = clip(channel.voice);
+    const external = clip(channel.external_sources);
+    if (niche) lines.push(`- Niche: ${niche}`);
+    if (positioning) lines.push(`- Positioning: ${positioning}`);
+    if (audience) lines.push(`- Audience: ${audience}`);
+    if (voice) lines.push(`- Voice: ${voice}`);
+    if (external) lines.push(`- External sources: ${external}`);
+    if (!niche && !positioning && !audience && !voice) {
+      lines.push("- (context is sparse — when the user describes the channel, call update_channel_context to capture it; don't silently note for later)");
+    }
 
-    // T9 — per-channel HAmo-authored ideation rules. Surfaced as its own
-    // H2 because these are HARD enforcement (override every heuristic).
-    // generate_ideas injects the same string into its compose prompt;
-    // the agent ALSO sees it here so it doesn't propose hand-typed titles
-    // that violate the rules in conversation flows that bypass the tool.
-    const ideationRulesValue = (channel.ideation_rules ?? "").trim();
-    if (ideationRulesValue.length > 0) {
+    // T9 — HAmo-authored ideation rules. Capped at 1200 chars.
+    const rulesRaw = (channel.ideation_rules ?? "").trim();
+    if (rulesRaw.length > 0) {
+      const rules = rulesRaw.length > 1200 ? `${rulesRaw.slice(0, 1199)}…` : rulesRaw;
       lines.push(
         "",
-        `## Per-channel ideation rules (HAmo-authored, HARD enforcement)`,
-        `The creator has set these rules for THIS channel. They override every other compose heuristic — propose-time or composition-time. A title that violates any rule below MUST be regenerated or dropped, never softened.`,
-        ideationRulesValue,
-        ""
+        "## Per-channel ideation rules (HARD enforcement — override every compose heuristic)",
+        rules
       );
     }
 
-    // Persistent per-channel memory. Top 20 by confidence DESC, recency
-    // DESC. These are durable facts the agent should carry across chats
-    // for this channel — sponsor policy, upload cadence, audience quirks,
-    // anything the user told us once and would re-tell us a month later.
-    const memory = listChannelMemory(channel.id).slice(0, 20);
-    lines.push("", `## Persistent facts about this channel (from channel_memory)`);
-    if (memory.length === 0) {
-      lines.push(
-        `(none yet — propose save_channel_memory when the user mentions a durable fact about the channel)`
-      );
-    } else {
+    // Memory — top 5 by confidence (cap total ~1500 chars).
+    const memory = listChannelMemory(channel.id).slice(0, 5);
+    if (memory.length > 0) {
+      lines.push("", "## Channel memory (top 5 by confidence)");
+      let used = 0;
       for (const m of memory) {
-        lines.push(
-          `- **${m.key}** (confidence ${m.confidence.toFixed(2)}): ${m.value}`
-        );
+        const v = m.value.length > 300 ? `${m.value.slice(0, 299)}…` : m.value;
+        const line = `- ${m.key} (${m.confidence.toFixed(2)}): ${v}`;
+        if (used + line.length > 1500) break;
+        lines.push(line);
+        used += line.length;
       }
     }
-    lines.push("");
 
-    // Banned topics — surfaced as its own H2 so the constraint isn't
-    // buried in the catch-all memory list. generate_ideas reads the same
-    // row server-side and drops matching clusters, but the agent ALSO
-    // sees it here so it doesn't propose hand-typed banned topics in
-    // user-asked conversation flows that bypass the tool.
+    // Banned topics block — kept as its own H2 so generate_ideas drops
+    // and conversational drift are guarded by the same constraint.
     const bannedRow = memory.find((m) => m.key === "banned_topics");
     if (bannedRow && bannedRow.value.trim().length > 0) {
       const terms = bannedRow.value
         .split(",")
         .map((t) => t.trim())
         .filter((t) => t.length > 0);
-      lines.push("", `## Banned topics for this channel`);
       lines.push(
-        `The creator has explicitly banned these topics. NEVER propose ideas touching them, in chat or via generate_ideas. Case-insensitive substring match.`
+        "",
+        "## Banned topics for this channel (case-insensitive substring, NEVER propose)",
+        terms.map((t) => `- ${t}`).join("\n")
       );
-      for (const t of terms) {
-        lines.push(`- ${t}`);
-      }
-      lines.push("");
     }
+
     if (allChannels.length > 1) {
       const others = allChannels
         .filter((c) => c.id !== channel.id)
-        .map((c) => `"${c.title ?? c.id}"${c.handle ? ` (${c.handle})` : ""}`)
+        .map((c) => `"${c.title ?? c.id}"`)
+        .slice(0, 6)
         .join(", ");
       lines.push(
-        `- The user has **${allChannels.length} channels connected** in this app. Other connected channels (NOT active right now): ${others}.`,
-        `- **CRITICAL multi-channel rule:** every local-DB tool (list_videos, search_transcripts, search_comments, video_stats, raw_sql, etc.) returns data from the ACTIVE channel only. The other channels' videos/transcripts/comments are NOT visible to these tools until the user switches the active channel. If the user asks "ideas based on our channel" or "what's worked for us", that always means the ACTIVE channel — never an aggregate across all of them, and never a different one.`,
-        `- If the user names a specific channel by handle/title that matches one of their OTHER connected channels, tell them to switch to it in the sidebar first. Do not silently answer with the active channel's data and pretend it's the other one.`
+        "",
+        `## Multi-channel scope (CRITICAL)`,
+        `${allChannels.length} channels connected; OTHER channels in this workspace (NOT active): ${others}. Every local-DB tool is scoped to THIS channel ONLY. Never aggregate. If the user names another connected channel, tell them to switch via the top-right picker first.`
       );
     }
-    lines.push(
-      `- When the user asks about a channel that is NOT in the connected list (a competitor, a reference channel they admire), use external tools (Exa / Apify / youtube search) — do NOT confuse it with the active channel's local data.`
-    );
   } else if (bound) {
-    lines.push(`- A channel is bound (${bound}) but not yet synced — suggest running a sync.`);
+    lines.push(`- Channel ${bound} is bound but not synced — suggest running a sync.`);
   } else {
-    lines.push(`- No channel is bound yet. Suggest connecting a YouTube channel in Integrations before deep analysis.`);
+    lines.push("- No channel bound. Suggest connecting one via /integrations before deep analysis.");
   }
 
-  lines.push(``, `## Available tools — by name, by purpose`);
+  lines.push("", "## Available tools (full schemas attached to this turn)");
   if (activeGroups.length === 0) {
-    lines.push(
-      `- None active in this conversation. Reason from prior knowledge only; if the user asks for live data, tell them to enable a tool group via the "+" menu.`
-    );
+    lines.push("- None active. If the user needs live data, tell them to enable a group via the '+' menu.");
   } else {
-    lines.push(
-      `Always call a tool when one can answer the question — never speculate when data is available. Cite the tool that produced each fact ("from list_outliers: …").`,
-      ``
-    );
-
-    if (activeGroups.includes("youtube")) {
+    if (activeGroups.includes("ideation")) {
       lines.push(
-        `### Channel data (active-channel-scoped local DB)`,
-        `- channel_summary — channel + headline stats`,
-        `- list_my_videos — your videos, sortable, searchable`,
-        `- search_my_transcripts — keyword search across your video transcripts`,
-        `- get_video_comments / list_video_comments_cached / search_my_comments / get_comment_thread — comment data`,
-        ``
+        "### Ideation (§1/§2/§4 engine — primary surface)",
+        "list_outliers · list_format_patterns · explain_outlier · generate_ideas · validate_idea · update_channel_context · save_channel_memory · forget_channel_memory · ban_format · unban_format"
       );
     }
-
-    if (activeGroups.includes("analytics")) {
+    if (activeGroups.includes("my_channel")) {
       lines.push(
-        `### Analytics & SQL (deeper local work)`,
-        `- execute_sql — read-only SQL over local DB tables (videos, transcripts, comments, etc.)`,
-        `- youtube_trending — top-trending videos in a niche/region`,
-        `- niche_explorer — top channels + outlier videos in a niche`,
-        `- fetch_transcript — transcript for any public YouTube video`,
-        ``
+        "### My Channel (active-channel-scoped local DB, no quota)",
+        "channel_summary · list_my_videos · search_my_transcripts · search_my_comments"
       );
     }
-
-    if (activeGroups.includes("research")) {
+    if (activeGroups.includes("studio_analytics")) {
       lines.push(
-        `### Research`,
-        `- youtube_suggest — YouTube autocomplete (real search-demand signal)`,
-        ``
-      );
-    }
-
-    if (activeGroups.includes("exa")) {
-      lines.push(
-        `### External web`,
-        `- web_search / web_fetch — semantic web search + page contents via Exa. Use for competitor research, articles, external context.`,
-        ``
-      );
-    }
-
-    if (activeGroups.includes("apify")) {
-      lines.push(
-        `### Apify (paid scrapers)`,
-        `- scrape_youtube_channel — full sync of a competitor channel via Apify (paid). Use when you need competitor data that isn't in the user's DB.`,
-        `- get_youtube_transcript — Apify-backed transcript fallback when fetch_transcript can't find one.`,
-        ``
-      );
-    }
-
-    if (activeGroups.includes("yt_analytics")) {
-      lines.push(
-        `### YouTube Analytics (live, OAuth-gated)`,
-        `- get_channel_analytics_overview / get_channel_audience / get_channel_revenue — channel-wide period data`,
-        `- get_video_analytics — per-video retention, traffic sources, demographics, geography`,
-        `This is the ground truth for "how is my channel actually doing" — use it before relying on stale local DB stats.`,
-        ``
-      );
-    }
-
-    if (activeGroups.includes("strategy")) {
-      lines.push(
-        `### Competitive intelligence (per §1 B&S Method)`,
-        `- list_competitors — your tracked competitors, each tagged Authority / Breakthrough / Adjacent / Far`,
-        `- competitor_gap_analysis — keywords frequent in competitor top videos that you've NEVER used`,
-        ``,
-        `### Outliers + ideation (the §2 + §9 engine)`,
-        `- list_outliers — competitor videos beating their own median. Default mode (60d window, ≥2×, sorted by multiplier) for "what's working broadly". Pass recent_only=true for the discovery log (≥1.5× floor, sorted by detection time DESC) when the user asks "what's new" or "any viral hits since I last looked"; combine with unreadOnly=true to filter to unacknowledged. The ideation path (generate_ideas) tightens this to ≥5× internally — list_outliers itself stays general-purpose.`,
-        `- explain_outlier — 2-3 §9 levers + reasoning for a specific outlier (cached permanently)`,
-        `- generate_ideas — up to 10 ideas via OUTLIERS-PRIMARY composition. The server pulls top 30 recent outliers (≥1.5× / 28d), top 5 OPTIONAL trending formats, and composes 1 idea per outlier. Roughly 40-60% of ideas remix with a format template (sourceFormat set); the rest are free-form titles (sourceFormat null). Drop gates: title length, banned language, banned topics (pre-LLM on outliers + post-LLM on titles), own-catalog topic frequency, originality, topic-cluster dedup. Drops surface in result.dropped[]. Pass mode:"free-form" when the user explicitly asks for no format templates.`,
-        `- list_format_patterns — title-format templates extracted from outliers (§4). Defaults to formats with ≥3 example videos ('proven'). Pass minExamples=1 to surface emerging patterns and label them 'emerging, not proven'.`,
-        `- validate_idea — search the user's own catalog for similar/adjacent topics before recommending one. Returns verdict + verdictCopy + per-video performance bands. Use BEFORE recommending any topic that didn't come straight out of generate_ideas (which auto-validates).`,
-        `- update_channel_context — propose/apply edits to the active channel's niche/positioning/audience/voice/external_sources. MUST follow the two-step confirm: first call returns a diff, second call (after user says yes) writes.`,
-        `- save_channel_memory — store a durable fact about the active channel (key, value). Two-step confirm — mirrors update_channel_context. Use when the user says something like "remember that we never do sponsor reads" or "our videos always end with a call to subscribe".`,
-        `- forget_channel_memory — delete a stored fact by key. Two-step confirm. Use when the user explicitly says to forget something. NEVER mass-clear — one key at a time, each with its own confirm.`,
-        `- ban_format / unban_format — soft-ban or restore a trending title format for THIS channel. Two-step confirm — first call returns the resolved format + asks for approval, second call (after explicit user 'yes') applies. Accepts format_id (preferred — from list_format_patterns) OR template_match (substring fuzzy match). On >1 match the tool returns candidates + requires_disambiguation:true; show the list to the user and ask them to pick by format_id, then retry. Banned formats stop appearing in Patterns, list_format_patterns, and the idea-generator pool.`,
-        ``,
-        `### Audience (your own videos)`,
-        `- get_comment_analysis — sentiment, themes, objections, future-video ideas, standout quote candidates per video`
+        "### Studio Analytics (live, OAuth-gated)",
+        "get_channel_analytics_overview · get_video_analytics · get_channel_audience · get_channel_revenue"
       );
     }
   }
 
   lines.push(
-    ``,
-    `## Operating rules`,
-    `1. Always call a tool when one can answer. No data speculation.`,
-    `2. Cite the tool that produced each fact ("from list_outliers: …", "from list_format_patterns: …").`,
-    `3. Active channel scope is sacred — never silently aggregate across the user's channels.`,
-    `4. For ideation questions: list_outliers → optionally list_format_patterns → generate_ideas. Don't skip to generate_ideas without the source.`,
-    `5. For "why did X work" questions: list_outliers (or accept the videoId from context) → explain_outlier.`,
-    `6. Avoid retrying the same tool+input combination — the dispatcher rejects duplicates.`,
-    `7. Two-step confirm is MANDATORY for every mutating channel tool: update_channel_context (niche/positioning/audience/voice/external_sources/ideation_rules), save_channel_memory, forget_channel_memory, ban_format, unban_format. First call ALWAYS with confirm:false (or omitted) — the tool returns a proposal/diff. Show it to the user, get an explicit yes, THEN call AGAIN with confirm:true and the SAME payload. Never blanket-mutate without per-target approval — when the user says "delete my channel context" or "ban everything weak", ask which field/format and confirm one at a time. For ban_format/unban_format with template_match: if requires_disambiguation:true, surface the candidate list and ask the user to pick by format_id BEFORE proceeding to confirm.`,
-    `8. When you report ANY video's performance — competitor outlier OR own-channel video — translate raw multipliers to human bands BEFORE writing the line:`,
-    `     ≥ 5×        → "hit hard" (or "blew up" for the very biggest)`,
-    `     2× to < 5×  → "above average"`,
-    `     0.8× to < 2× → "average for this channel"`,
-    `     < 0.8×      → "underperformed" (or "flopped")`,
-    `   The raw multiplier may appear in parentheses for transparency, never naked.`,
-    `     Bad:  "your 'JWST biosignatures' video was 33× median"`,
-    `     Good: "your 'JWST biosignatures' video hit hard (33×)"`,
-    `     Bad:  "competitor X did 0.4× their median"`,
-    `     Good: "competitor X's video underperformed (0.4×)"`,
-    `   Validation responses already include a performanceBand field — use it verbatim rather than re-classifying.`,
-    `9. Per MENTOR_METHOD §3, a topic is evergreen only if it's been validated across multiple channels and time periods. The validate_idea tool checks YOUR catalog (different question). §3 validation is the cross-channel step — use list_outliers + competitor data for that, never a single competitor outlier. When generate_ideas returns ideas, the validation field covers only your own-catalog check; the cross-channel §3 check is on you.`,
-    `10. You are advising on the ${channel?.title ? `"${channel.title}"` : "currently active"} channel only. Never reference data, ideas, conversations, or memory facts from other channels in this session. If the user mentions another channel by name and asks you to factor it in, tell them to switch the active channel via the top-right picker before continuing. The 'Persistent facts about this channel' block above and every local-DB tool are scoped to THIS channel — treat anything you might remember about a sibling channel as out-of-scope context that does not apply here.`,
-    `11. NEVER silently relax an ideation threshold. When generate_ideas returns a 409 with "Only N outliers ≥{N}× in the last {W} days" or any "candidates pass, need ≥…" message, you MUST stop and ask the user. Example reply: "Only {N} candidates pass the ≥1.5× / last-28d bar — want me to widen the window (try 60d) or lower the multiplier (e.g. 1×)? Pick one." Then WAIT for the user's explicit choice and pass those exact params on the retry call. Do not auto-widen, auto-lower, or fall back to a different tool. Auto-loosening thresholds is the single most repeatable way to ship bad ideas; operating rule 11 exists because we caught the agent doing it.`,
-    `12. Default to TERSE. Show data + visuals + verdict, not prose. Long-form explanations are friction unless the user asks for them. When the user asks "why" / "explain" / "tell me more about idea N", THEN you elaborate — but not before. The mandatory ideation output format below is terse by design; do not pad it with extra paragraphs.`,
-    `13. Title language MUST be plain. Banned words/phrases inside proposedTitle: "cinematic", "sensory", "visceral", "profound", "desolate expanse", "humanity has ever charted", "humanity has ever mapped", "inexorable", "vastest", "the most absolute", "physically impossible". Register: words a 14-year-old reads in <2 seconds. Mirror the lexical register of competitor outliers ("huge", "hiding", "hard", "real", "big", "found", "moved"). When unsure: prefer Anglo-Saxon over Latinate. The server enforces this via regex on every proposedTitle — slips get one regenerate attempt then drop.`
+    "",
+    "## Operating rules (1-14, ALL non-negotiable)",
+    "1. Always call a tool when one can answer; cite it (\"from list_outliers: …\").",
+    "2. Active channel scope is sacred — never aggregate across the user's channels.",
+    "3. Ideation flow: list_outliers → optional list_format_patterns → generate_ideas. Don't skip to generate_ideas without the source.",
+    "4. \"Why did X work\": list_outliers (or use the videoId from context) → explain_outlier.",
+    "5. Don't repeat the same tool+input combination in one turn — the dispatcher rejects duplicates.",
+    "6. Two-step confirm is MANDATORY for every mutating tool (update_channel_context, save_channel_memory, forget_channel_memory, ban_format, unban_format). First call confirm:false returns a proposal; second call confirm:true applies. Show the proposal to the user verbatim, wait for explicit yes. For ban_format/unban_format on template_match: if requires_disambiguation, surface the candidate list and ask the user to pick by format_id BEFORE confirming.",
+    "7. Performance bands — translate multipliers BEFORE writing the line. ≥5× = \"hit hard\"; 2× to <5× = \"above average\"; 0.8×-<2× = \"average\"; <0.8× = \"underperformed\". Raw multiplier may appear in parentheses, never naked. validation responses already include performanceBand — use VERBATIM.",
+    "8. Per MENTOR_METHOD §3, evergreen = cross-channel + cross-time. validate_idea checks YOUR catalog only; the cross-channel §3 check is on you (use list_outliers + competitor data, never a single outlier).",
+    `9. You advise on the ${channel?.title ? `"${channel.title}"` : "active"} channel ONLY. Ignore facts/memory from other channels. If asked about a different connected channel, tell the user to switch first.`,
+    "10. NEVER silently relax ideation thresholds. When generate_ideas returns 409 (\"Only N outliers ≥X× in last W days…\"), STOP and ask the user: \"Widen the window (try 60d) or lower the multiplier (try 1×)? Pick one.\" Wait for their choice, then pass those exact params. Auto-loosening is the single most reliable way to ship bad ideas.",
+    "11. Default to TERSE. Show data + visuals + verdict, not prose. Elaborate ONLY when asked (\"why this format\" / \"explain idea N\").",
+    "12. Title language MUST be plain. Banned in proposedTitle: cinematic, sensory, visceral, profound, desolate expanse, humanity has ever charted, humanity has ever mapped, inexorable, vastest, the most absolute, physically impossible. Mirror competitor outlier register (\"huge\", \"hiding\", \"hard\", \"real\", \"big\", \"found\", \"moved\"). Server enforces this — slips get one regenerate attempt then drop.",
+    "13. The mandatory ideation output format lives in the generate_ideas tool description. Follow it exactly when listing ideas.",
+    "14. If the channel is small/inactive/wrong-niche, say it directly. Honesty over polish."
   );
 
-  // Ideation output format (mandatory). Inserted after the operating rules
-  // and before the optional advisor section so it reads as enforcement-tier,
-  // not optional flavor. The agent has access to all the data referenced
-  // below — generate_ideas returns thumbnailUrl/competitorTitle on every
-  // source outlier, plus topicSimilarOutliers (cross-channel topic siblings);
-  // list_format_patterns returns examples with thumbnails too.
-  //
-  // Terse-by-default: data + visuals + verdict, nothing more. No "Why this
-  // format works", no "Channel angle", no levers row. If the user wants
-  // reasoning, they ask — operating rule 12 governs.
-  lines.push(
-    ``,
-    `## Ideation output format (MANDATORY when listing video ideas)`,
-    ``,
-    `When you present ideas in chat — regardless of which tool produced them — open with the pre-ideation research block below, then list the ideas in the terse structure, then close with the one-sentence Next step. NO prose paragraphs anywhere. NO "Why this format works." NO "Channel angle." NO levers pill row. The user reads data + visuals + verdict, not explanations.`,
-    ``,
-    `### Pre-ideation research block (output FIRST, before the numbered ideas)`,
-    ``,
-    `**Pattern research (last 60d):**`,
-    `- Working: {3-5 bulleted themes derived from list_outliers / list_format_patterns results — viral outliers ≥5×, plain language, ≤8 words each}`,
-    `- Not working: {topics with ≥2 underperformers in the user's last 20 uploads — pull from validate_idea matchedVideos where performanceBand="underperformed", ≤8 words each}`,
-    `- Skipped: {banned topics that filtered out (from generate_ideas.bannedTopics) + topic-frequency drops (from generate_ideas.dropped where reason="topic_overused"). Cite the term and count.}`,
-    ``,
-    `Hard rules for the research block:`,
-    `- Bullets only. Max 5 items per bullet group.`,
-    `- If a group is empty, OMIT the entire line. Do NOT print "Working: (none)".`,
-    `- Each item ≤ 8 words. Plain language (operating rule 13).`,
-    ``,
-    `### Then the numbered ideas — each MUST follow this exact terse markdown structure:`,
-    ``,
-    `### {n}. {proposedTitle}`,
-    ``,
-    `[![]({sourceOutlier.thumbnailUrl})](https://www.youtube.com/watch?v={sourceOutlier.videoId}) **Inspired by:** [{sourceOutlier.competitorTitle} — {sourceOutlier.title}](https://www.youtube.com/watch?v={sourceOutlier.videoId}) · {performanceBand} ({multiplier}×)`,
-    ``,
-    `**Same topic across competitors:**`,
-    `- [![]({similar.thumbnailUrl})](https://www.youtube.com/watch?v={similar.videoId}) [{similar.competitorTitle} — {similar.title}](https://www.youtube.com/watch?v={similar.videoId}) · {similar.performanceBand} ({similar.multiplier}×)`,
-    `- [![]({similar.thumbnailUrl})](https://www.youtube.com/watch?v={similar.videoId}) [{similar.competitorTitle} — {similar.title}](https://www.youtube.com/watch?v={similar.videoId}) · {similar.performanceBand} ({similar.multiplier}×)`,
-    ``,
-    "**Format:** `{template}` · rising {risingRate}    ← OMIT this entire line when sourceFormat is null",
-    ``,
-    `{catalogEmoji} {catalogVerdictShort}`,
-    ``,
-    `---`,
-    ``,
-    `Hard rules:`,
-    `- Use \`[![](thumbnail)](url)\` for every video reference — image-as-link, no alt text needed.`,
-    `- performanceBand ("hit hard" / "above average" / "average" / "underperformed") comes VERBATIM from sourceTopicOutliers[0].performanceBand AND from each topicSimilarOutliers[*].performanceBand. Do not re-classify the multiplier.`,
-    `- catalogEmoji + catalogVerdictShort (max 8 words) replace the long verdictCopy. Map validation.verdict → emoji + short:`,
-    `    "fresh"                  → ✅ Fresh territory`,
-    `    "covered_old"            → ⚠️ Touched 60-90d ago, none since`,
-    `    "covered_recently"       → 🛑 Covered recently, would compete`,
-    `    "covered_underperformed" → 🟠 Recent flop — fresh angle needed`,
-    `- If a thumbnailUrl is missing, drop the image markdown for that one row but keep the text link.`,
-    `- Source outlier (sourceTopicOutliers[0]) and the topicSimilarOutliers list come pre-loaded on every generate_ideas return — do NOT fabricate or re-fetch.`,
-    `- The "Same topic across competitors" block uses topicSimilarOutliers (up to 3 entries). If the array is empty for an idea, OMIT the entire block (header + bullets) — do not print "Same topic across competitors: (none)".`,
-    `- sourceFormat may be null (free-form composition). When it's null, OMIT the entire "Format:" line — do not print "Format: (free-form)" or any placeholder. The idea stands on its own. Roughly 40-60% of ideas will have a format; the rest will be free-form. Both are valid.`,
-    `- After ALL ideas, end with: **Next step this week:** {one sentence — pick ONE idea and why}. One sentence. No follow-up paragraph.`,
-    `- Elaborate ONLY when the user explicitly asks ("why this format" / "explain idea N" / "tell me more"). Default = terse.`,
-    `- Never strip the structure to save tokens. If you can only fit 3 fully structured ideas, return 3; do NOT degrade to a table.`
-  );
-
-  // Tell the executor about the advisor ONLY when it's actually wired up for
-  // this request — otherwise we'd be encouraging calls to a non-existent tool.
   if (opts.advisorEnabled) {
     lines.push(
-      ``,
-      `## The \`advisor\` tool (your strategic escalation path)`,
-      `You have access to an \`advisor\` tool that routes a question to a stronger reasoning model (Claude Opus) and returns a short strategic opinion — a plan, a correction, or a stop signal.`,
-      `- **Budget: 3 calls** per turn, use them well.`,
-      `- **DO call advisor** when you face: synthesis of contradictory evidence, multi-factor strategic tradeoffs, final recommendations where stakes are high, or when you suspect your current plan is wrong.`,
-      `- **DO NOT call advisor** for simple lookups, data gathering, or formatting questions — you handle those yourself.`,
-      `- When you call advisor, phrase the question tightly. Example: "Given channel X has declining Shorts performance but growing long-form retention, and competitor Y switched to long-form 6 months ago with 3× subscriber growth — should this creator pivot fully away from Shorts, or split 30/70?"`,
-      `- Treat the advisor's answer as input to your reasoning, not as the final output. You still own the final answer to the user.`
+      "",
+      "## advisor (escalation to Opus)",
+      "Budget 3 calls/turn. Call for contradictory evidence, multi-factor tradeoffs, or when you suspect your plan is wrong. Don't call for lookups/formatting."
     );
   }
 
-  lines.push(
-    ``,
-    `## Workflow for non-trivial questions`,
-    `1. **Plan in 1 line**: what 3-5 tool calls give evidence for this question?`,
-    `2. **Gather parallel when possible** — issue independent tool calls in one turn, not serial. Sonnet can emit multiple tool_use blocks per response.`,
-    `3. **Start local, then external** — channel_summary / execute_sql before niche_explorer / exa / apify. Free data before paid.`,
-    `4. **Synthesise before you write** — look at all your results, find the pattern, THEN open your answer.`,
-    `5. **Structure the answer**: TL;DR (3 bullets max) → evidence sections with tables → concrete action list → the ONE thing to do this week.`,
-    ``,
-    `## Cost & failure discipline`,
-    `- You have a research budget of 12 rounds of tool calls. Don't waste rounds.`,
-    `- **If a tool fails, do not retry it more than once.** After a second failure the system will refuse the call and tell you to move on — respect that signal, note the limitation in your final answer, and continue from other sources.`,
-    `- **Never repeat an identical tool+input combination** in the same turn — the system tracks and rejects duplicates.`,
-    `- If data you need is missing, say exactly what's missing and why, then reason from what IS available. Do not invent numbers.`,
-    ``,
-    `## Style`,
-    `- Markdown tables for data. Bullets for insights. Headings for structure.`,
-    `- Match the user's language (UA / EN) in responses.`,
-    `- End every analytical task with a short "Next step this week:" section naming ONE concrete action.`
-  );
+  const prompt = lines.join("\n");
 
-  return lines.join("\n");
+  if (!promptSizeDiagLogged) {
+    promptSizeDiagLogged = true;
+    log.info(
+      "chat",
+      `[diag] system prompt: ${prompt.length} chars (~${Math.ceil(prompt.length / 4)} tokens) for groups=${activeGroups.join(",")}`
+    );
+  }
+
+  return prompt;
 }

@@ -15,10 +15,6 @@ import {
   Wrench,
   Check,
   PlaySquare,
-  Globe,
-  Bot,
-  BarChart3,
-  TrendingUp,
   Paperclip,
   Activity,
   ImagePlus,
@@ -26,6 +22,7 @@ import {
   ChevronRight,
   ChevronDown,
   Brain,
+  MoreHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -73,7 +70,7 @@ type Message = {
   thinking?: string;
 };
 
-type ToolGroup = "youtube" | "analytics" | "research" | "exa" | "apify" | "yt_analytics" | "strategy";
+type ToolGroup = "ideation" | "my_channel" | "studio_analytics";
 type IntegrationsStatus = Record<
   "claude" | "youtube" | "exa" | "apify" | "google_gemini",
   { hasKey: boolean } | undefined
@@ -82,82 +79,50 @@ type IntegrationsStatus = Record<
 const PROVIDER_PREF_KEY = "yt-channel-ai:chat-provider";
 
 // Starter prompts shown above the input when a session is empty. Click
-// fills the input; the user can edit before sending. These map directly
-// to the central-ideation-agent tool catalogue (list_outliers,
-// explain_outlier, competitor_gap_analysis, list_competitors).
+// fills the input; the user can edit before sending. Tuned for the new
+// pruned tool surface (ideation engine + own-channel introspection).
 const STARTER_PROMPTS = [
-  "Generate 5 video ideas from my current outliers",
+  "Give me 5 video ideas from my current outliers",
   "Why did the top outlier in my niche perform so well?",
-  "Find topic gaps in my niche that competitors haven't covered",
-  "Which competitor is breaking out the fastest?",
+  "What are my audience's top complaints about my last video?",
+  "Free-form: give me 5 fresh title ideas, no format templates",
 ] as const;
 
-const TOOL_DEFS: {
+// Tool-picker rows. Three groups only (post-prune); each row gets a
+// 1-line tooltip + a toggle. Full descriptions are NOT rendered in the
+// picker — the Tool.description fields shipped to the SDK are the
+// authoritative spec; this UI just controls availability.
+const TOOL_GROUPS: {
   key: ToolGroup;
   label: string;
-  description: string;
-  requires: "youtube" | "exa" | "apify" | null;
+  tooltip: string;
+  toolCount: number;
+  requires: "youtube" | "exa" | "apify" | "oauth" | null;
   icon: React.ComponentType<{ className?: string }>;
 }[] = [
   {
-    key: "youtube",
-    label: "YouTube (my channel)",
-    description:
-      "Local DB about your channel — videos, transcripts, comments. Use for questions about your own catalog.",
-    requires: "youtube",
-    icon: PlaySquare,
-  },
-  {
-    key: "analytics",
-    label: "Analytics & SQL",
-    description:
-      "Custom SQL over your local data + niche explorer (top channels and outlier videos in any niche). For deeper data work.",
-    requires: "youtube",
-    icon: BarChart3,
-  },
-  // YT Analytics needs Google OAuth, not the YouTube Data API key. We let
-  // the user enable it regardless — the tool itself returns a clear "not
-  // connected" error if OAuth is missing, which is more discoverable than
-  // hiding the toggle.
-  {
-    key: "yt_analytics",
-    label: "YouTube Analytics (OAuth)",
-    description:
-      "Live Studio-grade data: views/watch time over time, retention curves, traffic sources, demographics, revenue. Needs Google OAuth.",
-    requires: null,
-    icon: Activity,
-  },
-  {
-    key: "research",
-    label: "Trends & Suggest",
-    description:
-      "YouTube autocomplete (what people actually search for) — useful for keyword research and content ideas.",
-    requires: null,
-    icon: TrendingUp,
-  },
-  {
-    key: "exa",
-    label: "Exa (web search)",
-    description:
-      "Semantic web search outside YouTube — articles, news, industry context, anything Claude needs to know about the world.",
-    requires: "exa",
-    icon: Globe,
-  },
-  {
-    key: "strategy",
-    label: "Strategy (this app's analyses)",
-    description:
-      "Read-only access to your tracked competitors, outlier alerts, and AI Comment Analysis on your own videos. Use for 'what should I make next', 'what are competitors doing I'm not', 'what does my audience actually want'.",
+    key: "ideation",
+    label: "Ideation",
+    tooltip: "Outliers, formats, idea composition, channel memory",
+    toolCount: 10,
     requires: null,
     icon: Sparkles,
   },
   {
-    key: "apify",
-    label: "Apify (scrapers)",
-    description:
-      "Scrape competitor YouTube channels — videos, transcripts, stats. Use when you need data about creators not in your DB.",
-    requires: "apify",
-    icon: Bot,
+    key: "my_channel",
+    label: "My Channel",
+    tooltip: "Videos, transcripts, comments — local DB only",
+    toolCount: 4,
+    requires: null,
+    icon: PlaySquare,
+  },
+  {
+    key: "studio_analytics",
+    label: "Studio Analytics",
+    tooltip: "Live Studio metrics (OAuth required) — retention, audience, revenue",
+    toolCount: 4,
+    requires: "oauth",
+    icon: Activity,
   },
 ];
 
@@ -327,20 +292,27 @@ function ChatPageInner() {
         // disable individual groups via the "+" menu, and we don't override
         // their choice if they've already toggled anything this page-load.
         setActiveTools((prev) => {
-          if (prev.size > 0) return prev;
-          const defaults = new Set<ToolGroup>();
-          defaults.add("yt_analytics"); // surfaces a clear "not connected" if OAuth missing
-          defaults.add("research"); // youtube_suggest is keyless
-          // Strategy reads everything this app already computed — no
-          // external dependency. On by default so the AI immediately
-          // knows about hooks, competitors, gap analysis, etc.
-          defaults.add("strategy");
-          if (ints?.youtube?.hasKey) {
-            defaults.add("youtube");
-            defaults.add("analytics");
+          // Strip any legacy group names from prior schema versions
+          // (youtube/analytics/exa/apify/research/strategy/yt_analytics).
+          // localStorage may still hold them on returning users.
+          const validKeys = new Set<ToolGroup>([
+            "ideation",
+            "my_channel",
+            "studio_analytics",
+          ]);
+          const cleaned = new Set<ToolGroup>();
+          for (const k of prev) {
+            if (validKeys.has(k as ToolGroup)) cleaned.add(k as ToolGroup);
           }
-          if (ints?.exa?.hasKey) defaults.add("exa");
-          if (ints?.apify?.hasKey) defaults.add("apify");
+          if (cleaned.size > 0) return cleaned;
+          // First-load defaults: Ideation + My Channel always on (no
+          // external dep). Studio Analytics surfaces a clear "not
+          // connected" if OAuth is missing — leave it ON by default so
+          // HAmo sees the path to connect it.
+          const defaults = new Set<ToolGroup>();
+          defaults.add("ideation");
+          defaults.add("my_channel");
+          defaults.add("studio_analytics");
           return defaults;
         });
       })
@@ -453,6 +425,25 @@ function ChatPageInner() {
     },
     [activeId, refreshSessions, loadSession]
   );
+
+  // T3: workspace-level sidebar action — sweep every chat session with
+  // no user messages. Confirmed via window.confirm because it's a
+  // destructive batch op. Server scopes to the active channel by default
+  // (so the user only nukes the chats they actually see).
+  const clearEmptyChats = useCallback(async () => {
+    if (!confirm("Delete every empty chat (sessions with no messages you've sent)?")) {
+      return;
+    }
+    const r = await fetch("/api/sessions/clear-empty", { method: "POST" });
+    const d = (await r.json().catch(() => ({}))) as { removed?: number };
+    await refreshSessions();
+    if (typeof d.removed === "number" && d.removed > 0) {
+      // No toast component here; use the alert hop. Cheap; rarely fired.
+      window.setTimeout(() => {
+        alert(`Cleared ${d.removed} empty chat${d.removed === 1 ? "" : "s"}.`);
+      }, 0);
+    }
+  }, [refreshSessions]);
 
   const send = useCallback(async () => {
     const content = input.trim();
@@ -715,11 +706,20 @@ function ChatPageInner() {
     <div className="mx-auto flex h-[calc(100vh-5.5rem)] max-w-[1100px] overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       {/* Sessions sidebar */}
       <aside className="flex w-60 shrink-0 flex-col border-r border-border">
-        <div className="p-3">
-          <Button onClick={newChat} className="w-full justify-start gap-2" size="sm">
+        <div className="flex items-center gap-1.5 p-3">
+          <Button onClick={newChat} className="flex-1 justify-start gap-2" size="sm">
             <Plus className="h-4 w-4" />
             {t.chat.newChat}
           </Button>
+          <button
+            type="button"
+            onClick={() => void clearEmptyChats()}
+            title="Clear empty chats (sessions with no user messages)"
+            aria-label="Clear empty chats"
+            className="h-8 w-8 shrink-0 inline-flex items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <MoreHorizontal className="h-3.5 w-3.5" />
+          </button>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-3">
           {/* Active-channel hint — clarifies the sidebar is scoped. Only
@@ -740,39 +740,15 @@ function ChatPageInner() {
           ) : (
             <>
               {sessions.length > 0 ? (
-                <ul className="space-y-0.5" data-testid="chat-sidebar-sessions">
-                  {sessions.map((s) => (
-                    <li key={s.id}>
-                      <div
-                        className={cn(
-                          "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                          activeId === s.id
-                            ? "bg-accent text-accent-foreground"
-                            : "hover:bg-accent/60 text-foreground/80"
-                        )}
-                      >
-                        <button
-                          onClick={() => loadSession(s.id)}
-                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                        >
-                          <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="truncate">
-                            {s.title ?? t.chat.untitled}
-                          </span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (confirm(t.chat.deleteConfirm)) deleteSession(s.id);
-                          }}
-                          className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-                          aria-label="Delete"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
+                <SessionBuckets
+                  sessions={sessions}
+                  activeId={activeId}
+                  onSelect={loadSession}
+                  onDelete={(id) => {
+                    if (confirm(t.chat.deleteConfirm)) deleteSession(id);
+                  }}
+                  untitledLabel={t.chat.untitled}
+                />
               ) : (
                 activeChannelId && (
                   <div className="px-3 py-4 text-center text-xs text-muted-foreground">
@@ -780,55 +756,20 @@ function ChatPageInner() {
                   </div>
                 )
               )}
-              {/* Untagged: chats from before the per-channel migration land
-                  here. Collapsible so they don't clutter day-to-day use. */}
+              {/* Untagged: pre-migration chats. Collapsed by default once
+                  there are more than 5 so they don't clutter day-to-day. */}
               {untaggedSessions.length > 0 && (
-                <div className="mt-3 border-t border-border/60 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowUntagged((v) => !v)}
-                    className="flex w-full items-center justify-between px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
-                  >
-                    <span>Untagged ({untaggedSessions.length})</span>
-                    <span>{showUntagged ? "−" : "+"}</span>
-                  </button>
-                  {showUntagged && (
-                    <ul className="mt-1 space-y-0.5">
-                      {untaggedSessions.map((s) => (
-                        <li key={s.id}>
-                          <div
-                            className={cn(
-                              "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                              activeId === s.id
-                                ? "bg-accent text-accent-foreground"
-                                : "hover:bg-accent/60 text-foreground/80"
-                            )}
-                          >
-                            <button
-                              onClick={() => loadSession(s.id)}
-                              className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                            >
-                              <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              <span className="truncate">
-                                {s.title ?? t.chat.untitled}
-                              </span>
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (confirm(t.chat.deleteConfirm))
-                                  deleteSession(s.id);
-                              }}
-                              className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-                              aria-label="Delete"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+                <UntaggedSection
+                  sessions={untaggedSessions}
+                  activeId={activeId}
+                  onSelect={loadSession}
+                  onDelete={(id) => {
+                    if (confirm(t.chat.deleteConfirm)) deleteSession(id);
+                  }}
+                  untitledLabel={t.chat.untitled}
+                  defaultOpen={showUntagged}
+                  onToggle={() => setShowUntagged((v) => !v)}
+                />
               )}
             </>
           )}
@@ -930,58 +871,39 @@ function ChatPageInner() {
             {showToolMenu && (
               <div
                 ref={toolMenuRef}
-                className="absolute bottom-full left-0 mb-2 w-80 rounded-lg border border-border bg-popover p-2 shadow-lg"
+                className="absolute bottom-full left-0 mb-2 w-64 rounded-lg border border-border bg-popover p-1 shadow-lg"
+                data-testid="chat-tool-picker"
               >
-                <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
-                  {t.chat.tools}
-                </div>
-                <div className="mt-1 space-y-0.5">
-                  {TOOL_DEFS.map((tool) => {
-                    const hasToolKey =
-                      tool.requires === null ||
-                      !!integrations?.[tool.requires]?.hasKey;
-                    const available = hasToolKey;
-                    const active = activeTools.has(tool.key);
-                    const Icon = tool.icon;
-                    return (
-                      <button
-                        key={tool.key}
-                        type="button"
-                        disabled={!available}
-                        onClick={() => toggleTool(tool.key)}
-                        className={cn(
-                          "flex w-full items-start justify-between gap-2 rounded-md px-2 py-2 text-sm transition-colors text-left",
-                          available
-                            ? active
-                              ? "bg-primary/10 text-foreground"
-                              : "text-foreground hover:bg-accent"
-                            : "cursor-not-allowed text-muted-foreground"
-                        )}
-                      >
-                        <span className="flex min-w-0 flex-1 gap-2">
-                          <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                          <span className="min-w-0 flex-1">
-                            <span className="block font-medium">{tool.label}</span>
-                            <span className="block text-[11px] leading-snug text-muted-foreground">
-                              {tool.description}
-                            </span>
-                          </span>
-                        </span>
-                        <span className="mt-0.5 shrink-0">
-                          {active ? (
-                            <Check className="h-3.5 w-3.5 text-primary" />
-                          ) : !hasToolKey ? (
-                            <span className="text-[10px] text-muted-foreground">
-                              {t.chat.noKey}
-                            </span>
-                          ) : null}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="mt-2 border-t border-border px-2 pt-2 text-[10px] text-muted-foreground">
-                  {t.chat.toolHint}
+                {TOOL_GROUPS.map((g) => {
+                  // Studio Analytics is the only group that requires
+                  // OAuth — surfacing a 'Connect' link instead of a toggle
+                  // when not connected guides the user to /integrations.
+                  // The toggle stays enabled regardless because the agent
+                  // tool returns a clear "not connected" error too.
+                  const active = activeTools.has(g.key);
+                  const Icon = g.icon;
+                  return (
+                    <div
+                      key={g.key}
+                      title={`${g.tooltip} — ${g.toolCount} tools`}
+                      className="flex items-center justify-between rounded-md px-3 py-2.5 hover:bg-accent"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Icon className="h-4 w-4 text-muted-foreground" />
+                        <span className="text-sm font-medium">{g.label}</span>
+                      </div>
+                      <ToggleSwitch
+                        checked={active}
+                        onChange={() => toggleTool(g.key)}
+                        ariaLabel={`Toggle ${g.label}`}
+                      />
+                    </div>
+                  );
+                })}
+                <div className="mt-0.5 border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
+                  <Link href="/integrations" className="hover:text-foreground">
+                    Manage integrations →
+                  </Link>
                 </div>
               </div>
             )}
@@ -1121,6 +1043,261 @@ function ChatPageInner() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Truncate a chat title for sidebar display. Full title surfaces via title attr. */
+function truncateTitle(s: string | null | undefined, fallback: string): string {
+  const v = (s ?? "").trim();
+  if (!v) return fallback;
+  return v.length > 30 ? `${v.slice(0, 30).trimEnd()}…` : v;
+}
+
+/**
+ * T3: Date buckets for sidebar sessions. Today / This week / Older — with
+ * "Older" collapsible (default closed once it has anything). Within each
+ * bucket, sessions stay in their original (server-sorted by created_at
+ * DESC) order so the active one floats to the top.
+ */
+function SessionBuckets({
+  sessions,
+  activeId,
+  onSelect,
+  onDelete,
+  untitledLabel,
+}: {
+  sessions: Session[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  untitledLabel: string;
+}) {
+  const [olderOpen, setOlderOpen] = useState(false);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const todayCutoff = nowSec - 24 * 3600;
+  const weekCutoff = nowSec - 7 * 24 * 3600;
+  const today: Session[] = [];
+  const week: Session[] = [];
+  const older: Session[] = [];
+  for (const s of sessions) {
+    if (s.created_at >= todayCutoff) today.push(s);
+    else if (s.created_at >= weekCutoff) week.push(s);
+    else older.push(s);
+  }
+  return (
+    <div data-testid="chat-sidebar-sessions">
+      {today.length > 0 && (
+        <SessionGroup
+          label="Today"
+          sessions={today}
+          activeId={activeId}
+          onSelect={onSelect}
+          onDelete={onDelete}
+          untitledLabel={untitledLabel}
+        />
+      )}
+      {week.length > 0 && (
+        <SessionGroup
+          label="This week"
+          sessions={week}
+          activeId={activeId}
+          onSelect={onSelect}
+          onDelete={onDelete}
+          untitledLabel={untitledLabel}
+        />
+      )}
+      {older.length > 0 && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setOlderOpen((v) => !v)}
+            className="flex w-full items-center justify-between px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+          >
+            <span>Older ({older.length})</span>
+            <span>{olderOpen ? "−" : "+"}</span>
+          </button>
+          {olderOpen && (
+            <SessionGroup
+              label={null}
+              sessions={older}
+              activeId={activeId}
+              onSelect={onSelect}
+              onDelete={onDelete}
+              untitledLabel={untitledLabel}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionGroup({
+  label,
+  sessions,
+  activeId,
+  onSelect,
+  onDelete,
+  untitledLabel,
+}: {
+  label: string | null;
+  sessions: Session[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  untitledLabel: string;
+}) {
+  return (
+    <div className="mt-1">
+      {label && (
+        <div className="px-3 pb-0.5 pt-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+          {label}
+        </div>
+      )}
+      <ul className="space-y-0.5">
+        {sessions.map((s) => (
+          <SessionRow
+            key={s.id}
+            session={s}
+            active={activeId === s.id}
+            onSelect={() => onSelect(s.id)}
+            onDelete={() => onDelete(s.id)}
+            untitledLabel={untitledLabel}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SessionRow({
+  session,
+  active,
+  onSelect,
+  onDelete,
+  untitledLabel,
+}: {
+  session: Session;
+  active: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+  untitledLabel: string;
+}) {
+  const full = (session.title ?? "").trim() || untitledLabel;
+  return (
+    <li>
+      <div
+        className={cn(
+          "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+          active
+            ? "bg-accent text-accent-foreground"
+            : "hover:bg-accent/60 text-foreground/80"
+        )}
+      >
+        <button
+          onClick={onSelect}
+          title={full}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate">{truncateTitle(session.title, untitledLabel)}</span>
+        </button>
+        <button
+          onClick={onDelete}
+          className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+          aria-label="Delete"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function UntaggedSection({
+  sessions,
+  activeId,
+  onSelect,
+  onDelete,
+  untitledLabel,
+  defaultOpen,
+  onToggle,
+}: {
+  sessions: Session[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  untitledLabel: string;
+  defaultOpen: boolean;
+  onToggle: () => void;
+}) {
+  // Spec: collapsed by default when more than 5 entries. defaultOpen
+  // here is the parent's persistent flag; we honor it but layer the
+  // "auto-collapse when large" rule on top so first-load doesn't drown
+  // the sidebar.
+  const autoCollapsed = sessions.length > 5;
+  const open = autoCollapsed ? defaultOpen : true;
+  return (
+    <div className="mt-3 border-t border-border/60 pt-2">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+      >
+        <span>Untagged ({sessions.length})</span>
+        {autoCollapsed && <span>{open ? "−" : "+"}</span>}
+      </button>
+      {open && (
+        <ul className="mt-1 space-y-0.5">
+          {sessions.map((s) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              active={activeId === s.id}
+              onSelect={() => onSelect(s.id)}
+              onDelete={() => onDelete(s.id)}
+              untitledLabel={untitledLabel}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Inline toggle switch styled like a shadcn Switch. Avoids dragging in a
+ * Radix dep for one component used in two places (tool picker, future
+ * settings). Click flips checked → onChange fires the boolean.
+ */
+function ToggleSwitch({
+  checked,
+  onChange,
+  ariaLabel,
+}: {
+  checked: boolean;
+  onChange: () => void;
+  ariaLabel: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      onClick={onChange}
+      className={cn(
+        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+        checked ? "bg-primary" : "bg-muted-foreground/30"
+      )}
+    >
+      <span
+        className={cn(
+          "inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+          checked ? "translate-x-4" : "translate-x-0.5"
+        )}
+      />
+    </button>
   );
 }
 

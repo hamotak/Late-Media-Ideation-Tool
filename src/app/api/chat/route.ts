@@ -56,15 +56,10 @@ const CHAT_THINKING_BUDGET: number = (() => {
 
 // Must mirror the ToolGroup union in chat-tools.ts. Missing entries cause
 // the route to silently drop those groups even when the UI sends them.
-const ALLOWED_GROUPS: ToolGroup[] = [
-  "youtube",
-  "analytics",
-  "research",
-  "exa",
-  "apify",
-  "yt_analytics",
-  "strategy",
-];
+// The agent surface was pruned from 6 groups to 3 — old client-side
+// localStorage entries for "youtube" / "exa" / "apify" / etc. are filtered
+// out below and silently dropped.
+const ALLOWED_GROUPS: ToolGroup[] = ["ideation", "my_channel", "studio_analytics"];
 
 function encodeSSE(data: unknown): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);

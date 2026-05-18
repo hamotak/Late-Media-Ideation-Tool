@@ -421,6 +421,29 @@ export function deleteSession(id: string): void {
   db.prepare(`DELETE FROM chat_sessions WHERE id = ?`).run(id);
 }
 
+/**
+ * T3 (sidebar cleanup): delete every chat_session that has zero user-role
+ * messages — these are the "empty chats" HAmo sees stacking up when the
+ * client creates a session before sending. Optionally scoped to one
+ * channel; pass null to clear across all channels.
+ * Returns the count of sessions removed.
+ */
+export function clearEmptyChatSessions(channelId: string | null): number {
+  const sql = channelId
+    ? `DELETE FROM chat_sessions
+       WHERE (channel_id = ? OR (channel_id IS NULL AND ? IS NULL))
+         AND id NOT IN (
+           SELECT DISTINCT session_id FROM chat_messages WHERE role = 'user'
+         )`
+    : `DELETE FROM chat_sessions
+       WHERE id NOT IN (
+         SELECT DISTINCT session_id FROM chat_messages WHERE role = 'user'
+       )`;
+  const stmt = db.prepare(sql);
+  const info = channelId ? stmt.run(channelId, channelId) : stmt.run();
+  return info.changes;
+}
+
 /* ---- Pending-turn markers ---- */
 
 // Anything older than this is considered stale (dev server was restarted
