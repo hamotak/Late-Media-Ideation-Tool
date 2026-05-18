@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Loader2, Pencil, Sparkles, X } from "lucide-react";
+import { Check, Loader2, Sparkles, X } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -12,7 +12,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { ChannelAudience } from "@/components/channel-audience";
 import { ChannelRevenue } from "@/components/channel-revenue";
 import {
@@ -22,92 +21,36 @@ import {
   ThemesCard,
   TranscriptsCoverageCard,
 } from "@/components/channel-detail-widgets";
+import {
+  AgentMemoryPanel,
+  DescriptionEditor,
+  IdeationRulesEditor,
+} from "@/components/agent-brain-editors";
 
-type FieldKey =
-  | "niche"
-  | "positioning"
-  | "audience"
-  | "voice"
-  | "externalSources"
-  | "ideationRules";
-
+// Wire shape for the redesigned 2-field model. Legacy fields preserved
+// so older clients reading the GET response don't break; the page no
+// longer surfaces them (migration concatenated their text into the new
+// channel_description column on first boot).
 type ChannelContext = {
   id: string;
   channelId: string;
   title: string | null;
   handle: string | null;
   subscriberCount: number | null;
+  channelDescription: string;
+  ideationRules: string;
+  // Legacy — kept for type completeness, never rendered.
   niche: string;
   positioning: string;
   audience: string;
   voice: string;
   externalSources: string;
-  ideationRules: string;
 };
 
-type FieldDef = {
-  key: FieldKey;
-  label: string;
-  description: string;
-  placeholder: string;
-  multiline: boolean;
-};
-
-const FIELDS: FieldDef[] = [
-  {
-    key: "niche",
-    label: "Niche",
-    description: "One line — what this channel is about, in 5–15 words.",
-    placeholder:
-      "e.g. Cinematic sleep stories about the cosmos and deep space.",
-    multiline: false,
-  },
-  {
-    key: "positioning",
-    label: "Positioning",
-    description:
-      "What makes this channel different from competitors in the same niche.",
-    placeholder:
-      "e.g. Slow narration, no music spikes, all original astronomy facts.",
-    multiline: true,
-  },
-  {
-    key: "audience",
-    label: "Audience",
-    description: "Who watches this channel and why.",
-    placeholder:
-      "e.g. Insomniacs aged 25–45 who like science. Want to learn while drifting off.",
-    multiline: true,
-  },
-  {
-    key: "voice",
-    label: "Voice",
-    description: "Tone, pacing, signature stylistic elements.",
-    placeholder:
-      "e.g. Calm, measured, no hype words, no emojis, no AI-cliché phrases.",
-    multiline: true,
-  },
-  {
-    key: "externalSources",
-    label: "External sources",
-    description:
-      "Off-YouTube sources the AI should reference during ideation. One per line.",
-    placeholder:
-      "r/Space\nr/AskAstronomy\nNASA mission archives\nScientific American",
-    multiline: true,
-  },
-  {
-    key: "ideationRules",
-    label: "Ideation rules (HARD enforcement)",
-    description:
-      "Non-negotiable rules the ideation agent must follow when composing titles. Injected verbatim into the compose system prompt. One rule per line. Use for constraints you never want bent: voice constraints, banned shapes, format-bias overrides, etc.",
-    placeholder:
-      "Every title must mention a specific person or place.\nNever use abstract words ('reality', 'consciousness').\nMirror Late Science's terse register — no flowery adjectives.",
-    multiline: true,
-  },
-];
-
+// v2 cache key — flips when the proposal shape went from {niche,…} to
+// {description}. Stale v1 entries are ignored.
 const ANALYZE_CACHE_TTL_MS = 5 * 60 * 1000;
+const ANALYZE_CACHE_VERSION = "v2";
 const VIEW_MODE_KEY = "dashboard.viewMode";
 
 function fmtCount(n: number | null | undefined): string {
@@ -254,10 +197,18 @@ function SingleChannelCard({
   const [aiOpen, setAiOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [aiProposal, setAiProposal] = useState<Record<FieldKey, string> | null>(
+  const [aiProposal, setAiProposal] = useState<{ description: string } | null>(
     null
   );
   const [aiApplying, setAiApplying] = useState(false);
+  const [savedToast, setSavedToast] = useState<string | null>(null);
+
+  // 3-second auto-dismiss for the inline save toast.
+  useEffect(() => {
+    if (!savedToast) return;
+    const id = window.setTimeout(() => setSavedToast(null), 3000);
+    return () => window.clearTimeout(id);
+  }, [savedToast]);
 
   // Load /api/channel to populate the detail widgets (themes, transcripts
   // coverage, about, meta). Pass the focused channel id explicitly so the
@@ -289,22 +240,27 @@ function SingleChannelCard({
 
   const initial = (channel.title ?? channel.handle ?? "?").slice(0, 1).toUpperCase();
 
-  const cacheKey = `analyze_ai.cache.${channel.channelId}`;
+  const cacheKey = `analyze_ai_${ANALYZE_CACHE_VERSION}.cache.${channel.channelId}`;
 
   const openAi = async () => {
     setAiError(null);
     setAiOpen(true);
 
-    // Check client-side cache first.
+    // Check client-side cache first. v2 cache holds {description} only;
+    // older v1 entries (5-field shape) live under a different key and
+    // are silently ignored.
     if (typeof window !== "undefined") {
       try {
         const raw = window.localStorage.getItem(cacheKey);
         if (raw) {
           const parsed = JSON.parse(raw) as {
             at: number;
-            proposal: Record<FieldKey, string>;
+            proposal: { description: string };
           };
-          if (Date.now() - parsed.at < ANALYZE_CACHE_TTL_MS) {
+          if (
+            Date.now() - parsed.at < ANALYZE_CACHE_TTL_MS &&
+            typeof parsed.proposal?.description === "string"
+          ) {
             setAiProposal(parsed.proposal);
             return;
           }
@@ -322,11 +278,11 @@ function SingleChannelCard({
         body: JSON.stringify({ channelId: channel.channelId }),
       });
       const d = (await r.json().catch(() => ({}))) as {
-        proposal?: Record<FieldKey, string>;
+        proposal?: { description: string };
         error?: string;
         retryAfterSec?: number;
       };
-      if (!r.ok || !d.proposal) {
+      if (!r.ok || !d.proposal?.description) {
         const detail = d.retryAfterSec
           ? `${d.error ?? "rate limited"} (try again in ${d.retryAfterSec}s)`
           : (d.error ?? `HTTP ${r.status}`);
@@ -358,29 +314,30 @@ function SingleChannelCard({
     setAiError(null);
   };
 
-  const acceptAll = async () => {
+  // Single Apply step: overwrite channel_description with the AI's draft.
+  const acceptDescription = async () => {
     if (!aiProposal) return;
     setAiApplying(true);
-    let lastUpdated: ChannelContext | null = null;
     try {
-      for (const field of FIELDS) {
-        const proposed = aiProposal[field.key];
-        if (proposed === undefined || proposed === channel[field.key]) continue;
-        const r = await fetch("/api/channel-info", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            channelId: channel.channelId,
-            field: field.key,
-            value: proposed,
-          }),
-        });
-        const d = (await r.json().catch(() => ({}))) as {
-          channel?: ChannelContext;
-        };
-        if (d.channel) lastUpdated = d.channel;
+      const r = await fetch("/api/channel-info", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channelId: channel.channelId,
+          field: "channelDescription",
+          value: aiProposal.description,
+        }),
+      });
+      const d = (await r.json().catch(() => ({}))) as {
+        channel?: ChannelContext;
+        error?: string;
+      };
+      if (!r.ok || !d.channel) {
+        setAiError(d.error ?? `HTTP ${r.status}`);
+        return;
       }
-      if (lastUpdated) onUpdated(lastUpdated);
+      onUpdated(d.channel);
+      setSavedToast("AI-drafted description applied.");
       setAiOpen(false);
       setAiProposal(null);
     } catch (e) {
@@ -389,6 +346,18 @@ function SingleChannelCard({
       setAiApplying(false);
     }
   };
+
+  // Single-field save callback used by the editors. Refetches the row
+  // server-side so derived state (e.g. analytics widget channel info)
+  // stays in sync.
+  const handleFieldSaved = useCallback(
+    (field: "channelDescription" | "ideationRules", value: string) => {
+      const next: ChannelContext = { ...channel, [field]: value };
+      onUpdated(next);
+      setSavedToast("Saved — the agent will use this on the next message.");
+    },
+    [channel, onUpdated]
+  );
 
   return (
     <>
@@ -446,17 +415,41 @@ function SingleChannelCard({
             </Button>
           </div>
         </CardHeader>
-        <CardContent className="space-y-5">
-          <SectionDivider label="Channel context" />
-          {FIELDS.map((field) => (
-            <ContextField
-              key={field.key}
+        <CardContent className="space-y-6">
+          {savedToast && (
+            <div
+              className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400"
+              data-testid="channel-info-toast"
+            >
+              {savedToast}
+            </div>
+          )}
+          <div>
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <h3 className="text-sm font-semibold">Channel description</h3>
+            </div>
+            <p className="mb-2 text-xs text-muted-foreground">
+              One paragraph the agent reads before every job. Cover: what the channel is, who watches (age + region), what makes you different, voice + pacing. Plain words. The shorter the better — long fluff dilutes the agent&apos;s focus.
+            </p>
+            <DescriptionEditor
               channelId={channel.channelId}
-              field={field}
-              value={channel[field.key]}
-              onUpdated={onUpdated}
+              initialValue={channel.channelDescription}
+              onSaved={(v) => handleFieldSaved("channelDescription", v)}
             />
-          ))}
+          </div>
+          <div>
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <h3 className="text-sm font-semibold">Ideation rules <span className="text-xs font-normal text-muted-foreground">(HARD)</span></h3>
+            </div>
+            <p className="mb-2 text-xs text-muted-foreground">
+              Non-negotiable rules the ideation agent must follow when composing titles. Injected verbatim into the compose prompt. One rule per line — voice constraints, banned shapes, format-bias overrides, anything you never want bent.
+            </p>
+            <IdeationRulesEditor
+              channelId={channel.channelId}
+              initialValue={channel.ideationRules}
+              onSaved={(v) => handleFieldSaved("ideationRules", v)}
+            />
+          </div>
           <SectionDivider label="Agent memory" />
           <AgentMemoryPanel channelId={channel.channelId} />
         </CardContent>
@@ -478,7 +471,7 @@ function SingleChannelCard({
           applying={aiApplying}
           error={aiError}
           onClose={closeAi}
-          onAccept={acceptAll}
+          onAccept={acceptDescription}
         />
       )}
     </>
@@ -492,409 +485,6 @@ function SectionDivider({ label }: { label: string }) {
       <div className="h-px flex-1 bg-border" />
     </div>
   );
-}
-
-/* ---------------- Context field with inline edit ---------------- */
-
-function ContextField({
-  channelId,
-  field,
-  value,
-  onUpdated,
-}: {
-  channelId: string;
-  field: FieldDef;
-  value: string;
-  onUpdated: (next: ChannelContext) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  const startEdit = () => {
-    setDraft(value);
-    setSaveError(null);
-    setEditing(true);
-  };
-
-  const cancel = () => {
-    if (saving) return;
-    setEditing(false);
-    setSaveError(null);
-  };
-
-  const save = async () => {
-    setSaving(true);
-    setSaveError(null);
-    try {
-      const r = await fetch("/api/channel-info", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelId, field: field.key, value: draft }),
-      });
-      const d = (await r.json().catch(() => ({}))) as {
-        channel?: ChannelContext;
-        error?: string;
-      };
-      if (!r.ok || !d.channel) {
-        setSaveError(d.error ?? "Save failed.");
-        return;
-      }
-      onUpdated(d.channel);
-      setEditing(false);
-    } catch {
-      setSaveError("Save failed.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div>
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <div>
-          <div className="text-sm font-medium">{field.label}</div>
-          <div className="text-xs text-muted-foreground">{field.description}</div>
-        </div>
-        {!editing && (
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={startEdit}
-            aria-label={`Edit ${field.label}`}
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </Button>
-        )}
-      </div>
-
-      {editing ? (
-        <div className="space-y-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            disabled={saving}
-            placeholder={field.placeholder}
-            rows={
-              field.key === "externalSources" || field.key === "ideationRules"
-                ? 6
-                : field.multiline
-                  ? 4
-                  : 2
-            }
-            className={cn(
-              "w-full rounded-md border border-input bg-background px-3 py-2 text-sm",
-              "focus:outline-none focus:ring-2 focus:ring-ring",
-              "disabled:cursor-not-allowed disabled:opacity-60"
-            )}
-          />
-          {saveError && (
-            <div className="text-xs text-destructive">{saveError}</div>
-          )}
-          <div className="flex items-center gap-2">
-            <Button size="sm" onClick={save} disabled={saving}>
-              <Check className="mr-1 h-3.5 w-3.5" />
-              {saving ? "Saving…" : "Save"}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={cancel}
-              disabled={saving}
-            >
-              <X className="mr-1 h-3.5 w-3.5" />
-              Cancel
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <ReadValue value={value} field={field} />
-      )}
-    </div>
-  );
-}
-
-/* ---------------- Agent memory panel ---------------- */
-
-type MemoryRow = {
-  id: number;
-  channel_id: string;
-  key: string;
-  value: string;
-  source: string | null;
-  confidence: number;
-  updated_at: number;
-};
-
-function AgentMemoryPanel({ channelId }: { channelId: string }) {
-  const [rows, setRows] = useState<MemoryRow[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [draftKey, setDraftKey] = useState("");
-  const [draftValue, setDraftValue] = useState("");
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [editKey, setEditKey] = useState<string | null>(null);
-  const [editValue, setEditValue] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      const r = await fetch(
-        `/api/channel-info/memory?channelId=${encodeURIComponent(channelId)}`,
-        { cache: "no-store" }
-      );
-      const d = (await r.json()) as { memory?: MemoryRow[]; error?: string };
-      if (d.error) {
-        setError(d.error);
-        setRows([]);
-        return;
-      }
-      setRows(d.memory ?? []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "failed to load memory");
-    }
-  }, [channelId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const upsert = async (key: string, value: string) => {
-    setBusyKey(key);
-    setError(null);
-    try {
-      const r = await fetch("/api/channel-info/memory", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelId, key, value }),
-      });
-      if (!r.ok) {
-        const d = (await r.json().catch(() => ({}))) as { error?: string };
-        setError(d.error ?? `HTTP ${r.status}`);
-        return;
-      }
-      await load();
-    } finally {
-      setBusyKey(null);
-    }
-  };
-
-  const remove = async (key: string) => {
-    if (!window.confirm(`Delete memory "${key}"?`)) return;
-    setBusyKey(key);
-    setError(null);
-    try {
-      const r = await fetch("/api/channel-info/memory", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelId, key }),
-      });
-      if (!r.ok) {
-        const d = (await r.json().catch(() => ({}))) as { error?: string };
-        setError(d.error ?? `HTTP ${r.status}`);
-        return;
-      }
-      await load();
-    } finally {
-      setBusyKey(null);
-    }
-  };
-
-  const startEdit = (row: MemoryRow) => {
-    setEditKey(row.key);
-    setEditValue(row.value);
-  };
-
-  const saveEdit = async () => {
-    if (!editKey) return;
-    await upsert(editKey, editValue.trim());
-    setEditKey(null);
-    setEditValue("");
-  };
-
-  const onAdd = async () => {
-    const k = draftKey.trim();
-    const v = draftValue.trim();
-    if (!k || !v) {
-      setError("Both key and value are required.");
-      return;
-    }
-    await upsert(k, v);
-    setDraftKey("");
-    setDraftValue("");
-    setAdding(false);
-  };
-
-  return (
-    <div data-testid="agent-memory-panel">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <p className="text-xs text-muted-foreground">
-          Durable facts the chat agent remembers across sessions for this
-          channel. The agent can propose saves via the chat tools (with
-          confirmation); you can also add or edit them here directly.
-        </p>
-        {!adding && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setAdding(true)}
-            className="shrink-0 gap-1.5"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-            Add fact
-          </Button>
-        )}
-      </div>
-      {error && (
-        <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1.5 text-xs text-destructive">
-          {error}
-        </div>
-      )}
-      {adding && (
-        <div className="mb-3 space-y-2 rounded-md border border-border/60 p-3">
-          <input
-            type="text"
-            placeholder="key (snake_case, e.g. sponsor_policy)"
-            value={draftKey}
-            onChange={(e) => setDraftKey(e.target.value)}
-            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-          <textarea
-            placeholder="value (prose — what the agent should remember)"
-            value={draftValue}
-            onChange={(e) => setDraftValue(e.target.value)}
-            rows={2}
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-          <div className="flex items-center gap-2">
-            <Button size="sm" onClick={onAdd} disabled={busyKey === draftKey.trim()}>
-              <Check className="mr-1 h-3.5 w-3.5" />
-              Save fact
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setAdding(false);
-                setDraftKey("");
-                setDraftValue("");
-                setError(null);
-              }}
-            >
-              <X className="mr-1 h-3.5 w-3.5" />
-              Cancel
-            </Button>
-          </div>
-        </div>
-      )}
-      {rows === null ? (
-        <div className="py-4 text-center text-xs text-muted-foreground">
-          Loading…
-        </div>
-      ) : rows.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border/60 px-3 py-6 text-center text-xs text-muted-foreground">
-          No facts saved yet. The agent will start proposing saves as the
-          user describes durable channel traits in chat.
-        </div>
-      ) : (
-        <ul className="space-y-2">
-          {rows.map((row) => (
-            <li
-              key={row.id}
-              className="rounded-md border border-border/60 p-2"
-            >
-              <div className="mb-1 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-                <span className="font-mono font-medium text-foreground">
-                  {row.key}
-                </span>
-                <span>conf {row.confidence.toFixed(2)}</span>
-                {row.source && <span>· {row.source}</span>}
-              </div>
-              {editKey === row.key ? (
-                <div className="space-y-2">
-                  <textarea
-                    value={editValue}
-                    onChange={(e) => setEditValue(e.target.value)}
-                    rows={2}
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                  <div className="flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      onClick={saveEdit}
-                      disabled={busyKey === row.key}
-                    >
-                      <Check className="mr-1 h-3.5 w-3.5" />
-                      Save
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        setEditKey(null);
-                        setEditValue("");
-                      }}
-                    >
-                      <X className="mr-1 h-3.5 w-3.5" />
-                      Cancel
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-start justify-between gap-2">
-                  <div className="whitespace-pre-wrap text-sm">
-                    {row.value}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => startEdit(row)}
-                      aria-label={`Edit ${row.key}`}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => remove(row.key)}
-                      aria-label={`Delete ${row.key}`}
-                      disabled={busyKey === row.key}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function ReadValue({ value, field }: { value: string; field: FieldDef }) {
-  if (value.length === 0) {
-    return (
-      <div className="text-sm italic text-muted-foreground/70">
-        Empty — click the pencil to add.
-      </div>
-    );
-  }
-  if (field.key === "externalSources") {
-    const lines = value.split("\n").filter((l) => l.trim().length > 0);
-    return (
-      <ul className="space-y-1 text-sm">
-        {lines.map((line, i) => (
-          <li key={i} className="font-mono text-xs text-foreground/90">
-            {line}
-          </li>
-        ))}
-      </ul>
-    );
-  }
-  return <div className="whitespace-pre-wrap text-sm">{value}</div>;
 }
 
 /* ---------------- Summary table (all-channels mode) ---------------- */
@@ -917,19 +507,16 @@ function SummaryTable({
                 <th className="px-3 py-2 font-medium">Title</th>
                 <th className="px-3 py-2 font-medium">Handle</th>
                 <th className="px-3 py-2 font-medium">Subs</th>
-                <th className="px-3 py-2 font-medium">Niche</th>
-                <th className="px-3 py-2 font-medium">Positioning</th>
+                <th className="px-3 py-2 font-medium">Description</th>
                 <th className="px-3 py-2 font-medium">Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {channels.map((c) => {
-                const filled =
-                  c.niche.length > 0 &&
-                  c.positioning.length > 0 &&
-                  c.audience.length > 0 &&
-                  c.voice.length > 0 &&
-                  c.externalSources.length > 0;
+                // "Context filled" now just means the agent has a usable
+                // description — the redesigned model collapses 5 fields
+                // into one paragraph. Empty description = needs work.
+                const filled = c.channelDescription.trim().length > 0;
                 const initial = (c.title ?? c.handle ?? "?")
                   .slice(0, 1)
                   .toUpperCase();
@@ -954,16 +541,10 @@ function SummaryTable({
                       {fmtCount(c.subscriberCount)}
                     </td>
                     <td
-                      className="max-w-[180px] truncate px-3 py-2 align-middle text-xs text-muted-foreground"
-                      title={c.niche}
+                      className="max-w-[320px] truncate px-3 py-2 align-middle text-xs text-muted-foreground"
+                      title={c.channelDescription}
                     >
-                      {c.niche || <span className="italic">—</span>}
-                    </td>
-                    <td
-                      className="max-w-[220px] truncate px-3 py-2 align-middle text-xs text-muted-foreground"
-                      title={c.positioning}
-                    >
-                      {c.positioning || <span className="italic">—</span>}
+                      {c.channelDescription || <span className="italic">—</span>}
                     </td>
                     <td className="px-3 py-2 align-middle">
                       {filled ? (
@@ -999,13 +580,15 @@ function AnalyzeModal({
   onAccept,
 }: {
   current: ChannelContext;
-  proposal: Record<FieldKey, string> | null;
+  proposal: { description: string } | null;
   loading: boolean;
   applying: boolean;
   error: string | null;
   onClose: () => void;
   onAccept: () => void;
 }) {
+  const currentDesc = current.channelDescription.trim();
+  const proposedDesc = proposal?.description?.trim() ?? "";
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
@@ -1020,11 +603,12 @@ function AnalyzeModal({
             <div>
               <CardTitle className="flex items-center gap-2 text-base">
                 <Sparkles className="h-4 w-4 text-primary" />
-                AI proposal — channel context
+                AI-drafted channel description
               </CardTitle>
               <CardDescription>
-                Claude analyzed this channel&apos;s recent videos +
-                transcripts. Review each field before accepting.
+                Claude analyzed this channel&apos;s recent videos, transcripts,
+                and (when connected) Studio demographics. One paragraph the
+                agent will read before every job.
               </CardDescription>
             </div>
             <Button
@@ -1051,46 +635,33 @@ function AnalyzeModal({
             </div>
           )}
           {!loading && proposal && (
-            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
-              {FIELDS.map((field) => {
-                const cur = current[field.key];
-                const next = proposal[field.key] ?? "";
-                return (
-                  <div
-                    key={field.key}
-                    className="rounded-md border border-border/60 p-3"
-                  >
-                    <div className="mb-1 text-xs font-medium">{field.label}</div>
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      <div>
-                        <div className="mb-1 text-[10px] uppercase text-muted-foreground">
-                          Current
-                        </div>
-                        <div
-                          className={cn(
-                            "whitespace-pre-wrap rounded bg-muted/30 p-2 text-xs",
-                            cur.length === 0 && "italic text-muted-foreground"
-                          )}
-                        >
-                          {cur || "Empty"}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="mb-1 text-[10px] uppercase text-primary">
-                          Proposed
-                        </div>
-                        <div className="whitespace-pre-wrap rounded bg-primary/5 p-2 text-xs">
-                          {next || (
-                            <span className="italic text-muted-foreground">
-                              (no proposal)
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 max-h-[60vh] overflow-y-auto pr-1">
+              <div>
+                <div className="mb-1 text-[10px] uppercase text-muted-foreground">
+                  Current
+                </div>
+                <div
+                  className={
+                    currentDesc.length === 0
+                      ? "rounded bg-muted/30 p-2 text-xs italic text-muted-foreground"
+                      : "rounded bg-muted/30 p-2 text-xs whitespace-pre-wrap"
+                  }
+                >
+                  {currentDesc || "(empty — Apply will write the AI draft into this field)"}
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-[10px] uppercase text-primary">
+                  Proposed ({proposedDesc.length} chars)
+                </div>
+                <div className="rounded bg-primary/5 p-2 text-xs whitespace-pre-wrap">
+                  {proposedDesc || (
+                    <span className="italic text-muted-foreground">
+                      (no proposal)
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
           )}
           <div className="flex items-center justify-end gap-2 border-t border-border/60 pt-3">
@@ -1105,7 +676,7 @@ function AnalyzeModal({
             <Button
               size="sm"
               onClick={onAccept}
-              disabled={!proposal || applying || loading}
+              disabled={!proposal || applying || loading || proposedDesc.length === 0}
               className="gap-1.5"
             >
               {applying ? (
@@ -1113,7 +684,7 @@ function AnalyzeModal({
               ) : (
                 <Check className="h-3.5 w-3.5" />
               )}
-              {applying ? "Applying…" : "Accept all"}
+              {applying ? "Applying…" : "Apply"}
             </Button>
           </div>
         </CardContent>

@@ -636,9 +636,9 @@ export type Channel = {
   monetization_status?: "monetized" | "pending" | "not_eligible" | null;
   notes?: string | null;
   expected_videos_per_month?: number | null;
-  // Per-channel context fields (set via /channel-info). DEFAULT '' in
-  // the schema means existing rows already have an empty string after
-  // the migration ran, so these are always strings, never null.
+  // Legacy 5-field context model — deprecated. Read only by the boot
+  // migration that concatenates them into channel_description. The
+  // agent's runtime prompt builders no longer touch these.
   niche?: string;
   positioning?: string;
   audience?: string;
@@ -649,7 +649,35 @@ export type Channel = {
   // empty). Edited on /channel-info; chat tool update_channel_context
   // also accepts this field.
   ideation_rules?: string;
+  // The one paragraph the agent reads before every job. Single source
+  // of truth for niche/positioning/audience/voice — replaces the legacy
+  // 5 fields. ≤1500 chars after trim.
+  channel_description?: string;
 };
+
+/**
+ * Resolve the channel's description with a legacy-fields fallback.
+ * Returns channel_description trimmed when non-empty; otherwise
+ * concatenates niche/positioning/audience/voice/external_sources with
+ * paragraph breaks (capped at 1500 chars). Returns "" when everything
+ * is empty.
+ *
+ * Used by both the chat-tools system-prompt builder and the
+ * idea-generator compose prompt so a channel that hasn't been
+ * migrated yet (or had its description manually cleared) still
+ * surfaces the legacy data to the agent.
+ */
+export function resolveChannelDescription(c: Channel | null | undefined): string {
+  if (!c) return "";
+  const desc = (c.channel_description ?? "").trim();
+  if (desc.length > 0) return desc;
+  const parts = [c.niche, c.positioning, c.audience, c.voice, c.external_sources]
+    .map((s) => (s ?? "").trim())
+    .filter((s) => s.length > 0);
+  if (parts.length === 0) return "";
+  const joined = parts.join("\n\n");
+  return joined.length > 1500 ? `${joined.slice(0, 1499).trimEnd()}…` : joined;
+}
 
 /**
  * Patch the user-managed metadata fields of a channel. Only the fields
@@ -688,20 +716,24 @@ export function updateChannelMeta(channelId: string, patch: ChannelMeta): void {
  * owns the strategy/voice context that downstream AI features consume.
  */
 export type ChannelContextField =
+  | "channel_description"
+  | "ideation_rules"
+  // Legacy — kept writable so old migrations + the chat tool's
+  // backwards-compatible path keep working. UI no longer surfaces these.
   | "niche"
   | "positioning"
   | "audience"
   | "voice"
-  | "external_sources"
-  | "ideation_rules";
+  | "external_sources";
 
 const CHANNEL_CONTEXT_FIELDS: readonly ChannelContextField[] = [
+  "channel_description",
+  "ideation_rules",
   "niche",
   "positioning",
   "audience",
   "voice",
   "external_sources",
-  "ideation_rules",
 ] as const;
 
 export function updateChannelContext(
@@ -1743,6 +1775,12 @@ db.exec(`
     // must always be safe to concatenate into a prompt — DEFAULT '' means
     // existing rows get an empty string immediately and the API never
     // returns NULL.
+    // Legacy 5-field context model. These columns are NO LONGER read by
+    // the agent (chat-tools.ts buildSystemPrompt + idea-generator
+    // buildUserBodyForCompose). They remain in schema for backwards
+    // compatibility — the migration below baked their concatenated text
+    // into the new channel_description column. Treat as deprecated;
+    // /channel-info no longer surfaces them.
     { name: "niche", type: "TEXT", default: "''" },
     { name: "positioning", type: "TEXT", default: "''" },
     { name: "audience", type: "TEXT", default: "''" },
@@ -1752,6 +1790,11 @@ db.exec(`
     // the ideation compose prompt. Same DEFAULT '' contract as the
     // other context fields so the prompt builder never sees NULL.
     { name: "ideation_rules", type: "TEXT", default: "''" },
+    // T1 of the channel-description redesign: one paragraph that
+    // replaces niche/positioning/audience/voice/external_sources for
+    // every downstream agent. ≤1500 chars after trim. Edited via the
+    // /channel-info Description field and the /chat Brain panel.
+    { name: "channel_description", type: "TEXT", default: "''" },
   ];
   for (const col of newColumns) {
     if (channelCols.includes(col.name)) continue;
@@ -1764,6 +1807,73 @@ db.exec(`
         `[db] add channels.${col.name} failed (ignored):`,
         err
       );
+    }
+  }
+}
+
+// One-shot migration for the channel_description redesign. For each
+// existing channel where description is still empty but at least one of
+// the legacy 5 fields has content, concatenate them with paragraph
+// breaks, truncate at the last sentence boundary before 1500 chars
+// (fall back to hard char truncate if no boundary found), and write to
+// channel_description. Idempotent via the settings flag.
+{
+  const FLAG = "channels.description_migrated_v1";
+  if (getSetting(FLAG) !== "1") {
+    try {
+      type Row = {
+        id: string;
+        channel_description: string | null;
+        niche: string | null;
+        positioning: string | null;
+        audience: string | null;
+        voice: string | null;
+        external_sources: string | null;
+      };
+      const rows = db
+        .prepare(
+          `SELECT id, channel_description, niche, positioning, audience, voice, external_sources
+           FROM channels`
+        )
+        .all() as Row[];
+      const upd = db.prepare(
+        `UPDATE channels SET channel_description = ? WHERE id = ?`
+      );
+      const CAP = 1500;
+      let migrated = 0;
+      for (const r of rows) {
+        if ((r.channel_description ?? "").trim().length > 0) continue;
+        const parts = [r.niche, r.positioning, r.audience, r.voice, r.external_sources]
+          .map((s) => (s ?? "").trim())
+          .filter((s) => s.length > 0);
+        if (parts.length === 0) continue;
+        let combined = parts.join("\n\n");
+        if (combined.length > CAP) {
+          const slice = combined.slice(0, CAP);
+          // Prefer the last sentence-ending punctuation before the cap.
+          const lastDot = Math.max(
+            slice.lastIndexOf("."),
+            slice.lastIndexOf("!"),
+            slice.lastIndexOf("?")
+          );
+          combined =
+            lastDot >= CAP - 300
+              ? `${slice.slice(0, lastDot + 1)}…`
+              : `${slice.trimEnd()}…`;
+        }
+        upd.run(combined, r.id);
+        migrated++;
+      }
+      setSetting(FLAG, "1");
+      if (migrated > 0) {
+        // eslint-disable-next-line no-console
+        console.info(
+          `[db] channel_description migration: populated ${migrated} channels from legacy fields`
+        );
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[db] channel_description migration failed (will retry next boot):", err);
     }
   }
 }

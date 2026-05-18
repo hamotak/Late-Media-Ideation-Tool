@@ -9,34 +9,47 @@ import {
 export const runtime = "nodejs";
 
 /**
- * Per-channel context page. GET returns every channel with its 5 context
- * fields (niche, positioning, audience, voice, externalSources) in the
- * wire-side camelCase shape. PATCH updates a single field on a single
- * channel — the page edits one field at a time, so batch upsert is
- * unnecessary and just adds an attack surface for partial writes.
+ * Per-channel context page. GET returns every channel with the agent's
+ * brain fields (channel_description + ideation_rules) plus the legacy
+ * 5-field bundle preserved for read-side compatibility. PATCH writes
+ * one field at a time.
  *
  * Intentionally NOT scoped by getActiveChannelId(): the page lists every
  * channel the user manages so they can fill context in one sitting.
+ *
+ * The legacy fields (niche / positioning / audience / voice /
+ * externalSources) are still WRITABLE — they're not surfaced in the
+ * redesigned UI, but the chat tool `update_channel_context` retains
+ * them in its input schema so older agent prompts don't break.
  */
 
 type WireField =
+  | "channelDescription"
+  | "ideationRules"
   | "niche"
   | "positioning"
   | "audience"
   | "voice"
-  | "externalSources"
-  | "ideationRules";
+  | "externalSources";
 
 const WIRE_TO_DB: Record<WireField, ChannelContextField> = {
+  channelDescription: "channel_description",
+  ideationRules: "ideation_rules",
   niche: "niche",
   positioning: "positioning",
   audience: "audience",
   voice: "voice",
   externalSources: "external_sources",
-  ideationRules: "ideation_rules",
 };
 
 const WIRE_FIELDS = Object.keys(WIRE_TO_DB) as WireField[];
+
+// Server-side caps so a runaway client can't blow the column. Mirrors
+// the editor component limits exactly.
+const FIELD_CAPS: Partial<Record<WireField, number>> = {
+  channelDescription: 1500,
+  ideationRules: 1200,
+};
 
 type ChannelContextWire = {
   id: string;
@@ -44,12 +57,15 @@ type ChannelContextWire = {
   title: string | null;
   handle: string | null;
   subscriberCount: number | null;
+  channelDescription: string;
+  ideationRules: string;
+  // Legacy fields still surfaced so older clients reading the GET
+  // response don't break; the redesigned UI ignores them.
   niche: string;
   positioning: string;
   audience: string;
   voice: string;
   externalSources: string;
-  ideationRules: string;
 };
 
 function toWire(c: Channel): ChannelContextWire {
@@ -59,12 +75,13 @@ function toWire(c: Channel): ChannelContextWire {
     title: c.title,
     handle: c.handle,
     subscriberCount: c.subscriber_count,
+    channelDescription: c.channel_description ?? "",
+    ideationRules: c.ideation_rules ?? "",
     niche: c.niche ?? "",
     positioning: c.positioning ?? "",
     audience: c.audience ?? "",
     voice: c.voice ?? "",
     externalSources: c.external_sources ?? "",
-    ideationRules: c.ideation_rules ?? "",
   };
 }
 
@@ -105,6 +122,13 @@ export async function PATCH(req: Request) {
   if (typeof value !== "string") {
     return NextResponse.json(
       { error: "value must be a string" },
+      { status: 400 }
+    );
+  }
+  const cap = FIELD_CAPS[field as WireField];
+  if (typeof cap === "number" && value.length > cap) {
+    return NextResponse.json(
+      { error: `${field} exceeds ${cap} char limit (got ${value.length})` },
       { status: 400 }
     );
   }

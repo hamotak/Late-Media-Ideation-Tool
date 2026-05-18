@@ -24,10 +24,12 @@ export const maxDuration = 60;
 
 const RATE_LIMIT_WINDOW_SEC = 5 * 60; // one analyze per channel per 5 min
 
-const FIELD_VOCAB = ["niche", "positioning", "audience", "voice", "externalSources"] as const;
-type FieldKey = (typeof FIELD_VOCAB)[number];
-
-type Proposal = Record<FieldKey, string>;
+// v2: single-paragraph channel_description (replaces the prior 5-field
+// proposal). The data-gathering scaffolding (transcripts, demographics,
+// comment summaries) is unchanged; only the output schema + prompt
+// shrinks to one ≤1500-char description.
+const DESCRIPTION_CAP = 1500;
+type Proposal = { description: string };
 
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as { channelId?: unknown };
@@ -169,12 +171,14 @@ export async function POST(req: Request) {
   const sec7 = extractSection(md, 7);
   const sec9 = extractSection(md, 9);
 
-  const audienceInstruction = demographicsBlock
-    ? "- audience: 1–3 sentences, who watches and why. USE THE DEMOGRAPHICS BLOCK ABOVE AS GROUND TRUTH — describe the audience grounded in those exact age/gender/country numbers; don't speculate about who watches when the data is right there. Mention the top age group and top 2 countries by share."
-    : "- audience: 1–3 sentences, who watches and why";
+  const audienceLine = demographicsBlock
+    ? "Cover audience grounded in the demographics block above as ground truth — top age group, top 2 countries by share. Do not speculate when the data is in front of you."
+    : "Cover audience inferred from titles + transcripts + comment-analysis summaries below — age range, region, what they're looking for.";
 
+  // v2: a single channel_description paragraph (one source of truth that
+  // the agent reads on every job). Replaces the prior 5-field proposal.
   const systemPrompt = [
-    "You are analyzing a YouTube creator's channel to propose values for five context fields that the rest of this app's AI features will read every time they run. Be accurate; if signal is weak for a field, say so in the field rather than inventing detail.",
+    "You are writing the channel_description paragraph for a YouTube creator. This single paragraph is what the rest of this app's AI agents read every time they run. Quality of this text directly shapes ideation quality.",
     "",
     "From MENTOR_METHOD.md §1 (Competitor mapping — the B&S Method):",
     sec1 || "(section unavailable)",
@@ -187,14 +191,20 @@ export async function POST(req: Request) {
     demographicsBlock ? "" : null,
     demographicsBlock || null,
     "",
-    "The five fields you are filling in:",
-    "- niche: one line, 5–15 words, what this channel is about",
-    "- positioning: 1–3 sentences, what makes this channel different from others in the same niche (use specifics; avoid generic claims)",
-    audienceInstruction,
-    "- voice: 1–3 sentences, tone / pacing / signature stylistic elements",
-    "- externalSources: newline-separated list of off-YouTube sources the AI should reference during ideation (e.g. \"r/Space\", \"NASA mission archives\"). Up to 6 lines.",
+    "# What this paragraph must cover",
+    "- WHAT the channel is about (1 sentence — the niche, but framed naturally, not as a definition).",
+    `- WHO watches and why. ${audienceLine}`,
+    "- HOW it sounds (voice, pacing, signature moves — concrete, not adjectives).",
+    "- WHAT makes it different from neighbouring channels in the same space.",
     "",
-    "Return ONLY a JSON object. No prose, no markdown, no code fence. Keys: niche, positioning, audience, voice, externalSources. Values are strings (externalSources is a single string with newlines between sources).",
+    "# Style",
+    "- Plain words a 14-year-old reads in <2 seconds. No flowery adjectives.",
+    "- 4-7 sentences total. ≤1500 characters. The shorter the better — long fluff dilutes the agent's focus.",
+    "- Specific over generic. \"Slow narration, sleep-friendly pacing, no music spikes\" beats \"high production value\".",
+    "- If signal is weak for any part (e.g. small channel with thin transcripts), say what you do know and stop — don't invent.",
+    "",
+    "Return ONLY a JSON object. No prose, no markdown, no code fence. Shape:",
+    "{ \"description\": string }",
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
@@ -231,7 +241,11 @@ export async function POST(req: Request) {
   try {
     const resp = await client.messages.create({
       model: providerModelId("claude"),
-      max_tokens: 1500,
+      // v2: single description paragraph ≤1500 chars ≈ ~400 tokens out.
+      // 1200 max_tokens gives headroom for the JSON wrapper + thinking
+      // room. Slightly tighter temperature than the prior 5-field call
+      // because we want one coherent paragraph, not 5 short field stubs.
+      max_tokens: 1200,
       temperature: 0.4,
       system: systemPrompt,
       messages: [{ role: "user", content: userBody }],
@@ -268,16 +282,15 @@ export async function POST(req: Request) {
 /**
  * Best-effort JSON parse. Claude usually returns clean JSON when told
  * "no markdown / no code fence" but occasionally wraps in ```json. This
- * peels common wrappers and validates the 5-field shape.
+ * peels common wrappers, extracts the description field, and clamps to
+ * the cap so a runaway model can't blow the column limit.
  */
 function parseProposal(raw: string): Proposal | null {
   let text = raw.trim();
-  // Strip code fences if present.
   if (text.startsWith("```")) {
     text = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
     text = text.trim();
   }
-  // Find the first { ... } block in case Claude added a stray header.
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end === -1 || end <= start) return null;
@@ -290,21 +303,16 @@ function parseProposal(raw: string): Proposal | null {
   }
   if (!parsed || typeof parsed !== "object") return null;
   const obj = parsed as Record<string, unknown>;
-  const out: Proposal = {
-    niche: "",
-    positioning: "",
-    audience: "",
-    voice: "",
-    externalSources: "",
+  const v = obj.description;
+  if (typeof v !== "string") return null;
+  const description = v.trim();
+  if (description.length === 0) return null;
+  return {
+    description:
+      description.length > DESCRIPTION_CAP
+        ? `${description.slice(0, DESCRIPTION_CAP - 1).trimEnd()}…`
+        : description,
   };
-  for (const k of FIELD_VOCAB) {
-    const v = obj[k];
-    if (typeof v === "string") out[k] = v.trim();
-    else if (Array.isArray(v) && k === "externalSources") {
-      out[k] = v.filter((s) => typeof s === "string").join("\n");
-    }
-  }
-  return out;
 }
 
 /**

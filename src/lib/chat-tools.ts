@@ -14,6 +14,7 @@ import {
   listChannelMemory,
   listCompetitorAlerts,
   listVideos,
+  resolveChannelDescription,
   searchComments,
   searchTranscripts,
   unbanOutlierFormat,
@@ -1283,17 +1284,6 @@ export function buildSystemPrompt(
   void loadMentorMethod;
   void extractSection;
 
-  // Cap per-field channel context so a verbose niche/positioning paragraph
-  // doesn't blow the prompt budget. /channel-info already caps at 2000
-  // chars per field, but rendering ALL six fields per turn means a
-  // verbose channel can still emit 12k chars — clamp each to 200 here.
-  const CTX_CAP = 200;
-  const clip = (s: string | undefined): string => {
-    const v = (s ?? "").trim();
-    if (!v) return "";
-    return v.length > CTX_CAP ? `${v.slice(0, CTX_CAP - 1).trimEnd()}…` : v;
-  };
-
   const lines: string[] = [
     "You are HAmo's YouTube ideation agent. Turn channel context + competitor outliers + extracted formats into ideas grounded in MENTOR_METHOD.md. Evidence-cited from tool calls, never speculation.",
     "",
@@ -1315,49 +1305,47 @@ export function buildSystemPrompt(
 
   if (channel) {
     lines.push(
-      `- "${channel.title ?? "(unknown)"}"${channel.handle ? ` — ${channel.handle}` : ""}, id \`${channel.id}\` · ${channel.subscriber_count ?? "?"} subs, ${channel.video_count ?? "?"} videos.`
+      `- "${channel.title ?? "(unknown)"}"${channel.handle ? ` — ${channel.handle}` : ""}, id \`${channel.id}\` · ${channel.subscriber_count ?? "?"} subs, ${channel.video_count ?? "?"} videos.`,
+      ""
     );
-    const niche = clip(channel.niche);
-    const positioning = clip(channel.positioning);
-    const audience = clip(channel.audience);
-    const voice = clip(channel.voice);
-    const external = clip(channel.external_sources);
-    if (niche) lines.push(`- Niche: ${niche}`);
-    if (positioning) lines.push(`- Positioning: ${positioning}`);
-    if (audience) lines.push(`- Audience: ${audience}`);
-    if (voice) lines.push(`- Voice: ${voice}`);
-    if (external) lines.push(`- External sources: ${external}`);
-    if (!niche && !positioning && !audience && !voice) {
-      lines.push("- (context is sparse — when the user describes the channel, call update_channel_context to capture it; don't silently note for later)");
+
+    // Channel description — single source of truth. Falls back to the
+    // concatenated legacy 5 fields when description is still empty
+    // (covers fresh installs + manual clears). Capped at 1500 chars.
+    const description = resolveChannelDescription(channel);
+    lines.push("## About this channel");
+    if (description.length > 0) {
+      lines.push(description);
+    } else {
+      lines.push("(not set — ask HAmo to fill /channel-info or the Brain panel in /chat)");
     }
 
-    // T9 — HAmo-authored ideation rules. Capped at 1200 chars.
+    // Ideation rules — HARD enforcement, capped at 1200 chars.
     const rulesRaw = (channel.ideation_rules ?? "").trim();
-    if (rulesRaw.length > 0) {
-      const rules = rulesRaw.length > 1200 ? `${rulesRaw.slice(0, 1199)}…` : rulesRaw;
-      lines.push(
-        "",
-        "## Per-channel ideation rules (HARD enforcement — override every compose heuristic)",
-        rules
-      );
-    }
+    const rules = rulesRaw.length > 1200 ? `${rulesRaw.slice(0, 1199)}…` : rulesRaw;
+    lines.push(
+      "",
+      "## Ideation rules (HARD — override every compose heuristic)",
+      rules.length > 0 ? rules : "(none set)"
+    );
 
-    // Memory — top 5 by confidence (cap total ~1500 chars).
+    // Persistent facts — top 5 memory rows by confidence, total ≤1500 chars.
     const memory = listChannelMemory(channel.id).slice(0, 5);
     if (memory.length > 0) {
-      lines.push("", "## Channel memory (top 5 by confidence)");
+      lines.push("", "## Persistent facts");
       let used = 0;
       for (const m of memory) {
         const v = m.value.length > 300 ? `${m.value.slice(0, 299)}…` : m.value;
-        const line = `- ${m.key} (${m.confidence.toFixed(2)}): ${v}`;
+        const line = `- ${m.key}: ${v}`;
         if (used + line.length > 1500) break;
         lines.push(line);
         used += line.length;
       }
     }
 
-    // Banned topics block — kept as its own H2 so generate_ideas drops
-    // and conversational drift are guarded by the same constraint.
+    // Banned topics — kept as its own H2 so the constraint is impossible
+    // to miss. The agent has to skip these in both conversational and
+    // generate_ideas paths.
     const bannedRow = memory.find((m) => m.key === "banned_topics");
     if (bannedRow && bannedRow.value.trim().length > 0) {
       const terms = bannedRow.value

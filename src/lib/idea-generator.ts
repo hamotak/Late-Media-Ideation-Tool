@@ -6,6 +6,8 @@ import {
   getIntegration,
   listAllChannels,
   listChannelMemory,
+  resolveChannelDescription,
+  type Channel,
 } from "./db";
 import { providerModelId } from "./ai-provider-types";
 import {
@@ -199,15 +201,11 @@ export type GenerateIdeasResult =
 // Legacy alias — some external callers (if any) imported Idea by name.
 export type Idea = ProposedIdea;
 
+// Channel context the compose stage actually USES. Description is the
+// resolved single-paragraph string (legacy-fallback handled by
+// resolveChannelDescription); ideation_rules ships verbatim.
 type ChannelCtx = {
-  niche?: string;
-  positioning?: string;
-  audience?: string;
-  voice?: string;
-  external_sources?: string;
-  // T9 — HAmo-authored hard-enforcement rules. Injected verbatim into
-  // the compose system prompt; the model treats them as non-negotiable
-  // (above format/topic fit, originality drift, etc).
+  description: string;
   ideation_rules?: string;
 };
 
@@ -440,7 +438,12 @@ export async function generateIdeasForChannel(opts: {
   const sec4 = extractSection(md, 4);
   const sec7 = extractSection(md, 7);
   const sec9 = extractSection(md, 9);
-  const ctx = channel as unknown as ChannelCtx;
+  // Resolve channel description via the legacy-fallback helper so old
+  // channels without the new column still surface concatenated context.
+  const ctx: ChannelCtx = {
+    description: resolveChannelDescription(channel as unknown as Channel),
+    ideation_rules: (channel as unknown as Channel).ideation_rules,
+  };
 
   const systemPrompt = buildSystemPromptForCompose({
     sec1,
@@ -1122,11 +1125,8 @@ function buildUserBodyForCompose(opts: {
           ];
   return [
     "# USER CHANNEL CONTEXT",
-    `- Niche: ${ctx.niche || "(empty)"}`,
-    `- Positioning: ${ctx.positioning || "(empty)"}`,
-    `- Audience: ${ctx.audience || "(empty)"}`,
-    `- Voice: ${ctx.voice || "(empty)"}`,
-    `- External sources: ${ctx.external_sources || "(empty)"}`,
+    `## About this channel`,
+    ctx.description.length > 0 ? ctx.description : "(not set — ask HAmo to fill /channel-info)",
     "",
     ...(bannedTopics.length > 0
       ? [

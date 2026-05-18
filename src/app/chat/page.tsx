@@ -23,7 +23,13 @@ import {
   ChevronDown,
   Brain,
   MoreHorizontal,
+  X,
 } from "lucide-react";
+import {
+  AgentMemoryPanel,
+  DescriptionEditor,
+  IdeationRulesEditor,
+} from "@/components/agent-brain-editors";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/lib/i18n/provider";
@@ -155,6 +161,16 @@ function ChatPageInner() {
   const [sending, setSending] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
   const [activeTools, setActiveTools] = useState<Set<ToolGroup>>(new Set());
+  // T4 — Agent Brain panel. Right-side collapsible drawer rendering the
+  // active channel's description + ideation rules + memory. localStorage
+  // persists open/closed per device. The panel's content lifts directly
+  // from /channel-info via the shared editors in components/agent-brain-editors.
+  const [brainOpen, setBrainOpen] = useState(false);
+  const [brainData, setBrainData] = useState<{
+    channelDescription: string;
+    ideationRules: string;
+  } | null>(null);
+  const [brainSaved, setBrainSaved] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Persist the user's last-used provider choice in localStorage so opening
@@ -210,6 +226,69 @@ function ChatPageInner() {
       /* localStorage unavailable — stick with DEFAULT_PROVIDER */
     }
   }, []);
+
+  // Hydrate Brain-panel open/closed state. Defaults closed so first-load
+  // doesn't trip the layout out the gate.
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("yt-channel-ai:chat-brain-open");
+      if (saved === "1") setBrainOpen(true);
+    } catch {
+      /* swallow */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "yt-channel-ai:chat-brain-open",
+        brainOpen ? "1" : "0"
+      );
+    } catch {
+      /* swallow */
+    }
+  }, [brainOpen]);
+
+  // Auto-dismiss Brain save toast.
+  useEffect(() => {
+    if (!brainSaved) return;
+    const id = window.setTimeout(() => setBrainSaved(null), 3000);
+    return () => window.clearTimeout(id);
+  }, [brainSaved]);
+
+  // Refetch the active channel's description + ideation rules whenever
+  // either (a) the panel opens, or (b) the active channel changes. Keeps
+  // the Brain view in sync after the user switches channels via the
+  // top-right picker without a full page reload.
+  useEffect(() => {
+    if (!brainOpen || !activeChannelId) return;
+    let cancelled = false;
+    fetch("/api/channel-info", { cache: "no-store" })
+      .then((r) => r.json())
+      .then(
+        (d: {
+          channels?: {
+            channelId: string;
+            channelDescription: string;
+            ideationRules: string;
+          }[];
+        }) => {
+          if (cancelled) return;
+          const row = (d.channels ?? []).find(
+            (c) => c.channelId === activeChannelId
+          );
+          if (row) {
+            setBrainData({
+              channelDescription: row.channelDescription ?? "",
+              ideationRules: row.ideationRules ?? "",
+            });
+          }
+        }
+      )
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [brainOpen, activeChannelId]);
 
   // Persist on change.
   useEffect(() => {
@@ -703,7 +782,7 @@ function ChatPageInner() {
   }, [activeId, sessions]);
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-5.5rem)] max-w-[1100px] overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <div className="mx-auto flex h-[calc(100vh-5.5rem)] max-w-[1400px] overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       {/* Sessions sidebar */}
       <aside className="flex w-60 shrink-0 flex-col border-r border-border">
         <div className="flex items-center gap-1.5 p-3">
@@ -816,6 +895,22 @@ function ChatPageInner() {
             only zero or one channel, so single-channel users see no clutter.
           */}
           <ChannelSwitcher />
+          <button
+            type="button"
+            onClick={() => setBrainOpen((v) => !v)}
+            aria-label="Toggle Agent Brain panel"
+            title="Agent Brain — channel description, ideation rules, memory"
+            data-testid="chat-brain-toggle"
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
+              brainOpen
+                ? "border-primary/40 bg-primary/10 text-primary"
+                : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+            )}
+          >
+            <Brain className="h-3.5 w-3.5" />
+            Brain
+          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -1042,6 +1137,88 @@ function ChatPageInner() {
           </div>
         </div>
       </div>
+
+      {/* T4: Agent Brain panel (right side, collapsible). Renders when
+          the toggle is on AND there's an active channel — without a
+          channel the editors have no scope to write to. The aside hides
+          on <lg viewport to keep mobile layouts sane. */}
+      {brainOpen && activeChannelId && (
+        <aside
+          className="hidden w-80 shrink-0 flex-col border-l border-border lg:flex"
+          data-testid="chat-brain-panel"
+        >
+          <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <Brain className="h-4 w-4 text-primary" />
+              <span className="text-sm font-medium">Agent Brain</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setBrainOpen(false)}
+              aria-label="Close Brain panel"
+              className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-3 py-3 space-y-5">
+            {brainSaved && (
+              <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400">
+                {brainSaved}
+              </div>
+            )}
+            {brainData === null ? (
+              <div className="flex items-center gap-2 py-6 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Loading channel context…
+              </div>
+            ) : (
+              <>
+                <div>
+                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Description
+                  </div>
+                  <DescriptionEditor
+                    channelId={activeChannelId}
+                    initialValue={brainData.channelDescription}
+                    variant="preview"
+                    onSaved={(v) => {
+                      setBrainData((prev) =>
+                        prev ? { ...prev, channelDescription: v } : prev
+                      );
+                      setBrainSaved("Saved · agent will use this on next message.");
+                    }}
+                  />
+                </div>
+                <div>
+                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Ideation rules (HARD)
+                  </div>
+                  <IdeationRulesEditor
+                    channelId={activeChannelId}
+                    initialValue={brainData.ideationRules}
+                    onSaved={(v) => {
+                      setBrainData((prev) =>
+                        prev ? { ...prev, ideationRules: v } : prev
+                      );
+                      setBrainSaved("Saved · agent will use this on next message.");
+                    }}
+                  />
+                </div>
+                <div>
+                  <AgentMemoryPanel
+                    channelId={activeChannelId}
+                    compact
+                    onSaved={() =>
+                      setBrainSaved("Saved · agent will use this on next message.")
+                    }
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        </aside>
+      )}
     </div>
   );
 }
