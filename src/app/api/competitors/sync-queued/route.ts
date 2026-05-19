@@ -11,6 +11,7 @@ import {
 import {
   CompetitorSyncError,
   enrichCompetitorMetadataFromYouTube,
+  requeueApifyFailedCompetitorsOnce,
   syncCompetitor,
 } from "@/lib/competitor-sync";
 import { log } from "@/lib/logger";
@@ -60,6 +61,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, skipped: true, reason: "locked" });
   }
   setSetting(LOCK_KEY, String(now));
+
+  // One-shot migration on the first run after the YT-default backend
+  // ships: re-queue competitors that previously failed with an Apify
+  // credits-exhausted error so the new backend picks them up cleanly.
+  // The helper is idempotent (guarded by a settings flag) so it's safe
+  // to call on every worker invocation.
+  try {
+    requeueApifyFailedCompetitorsOnce();
+  } catch (err) {
+    log.warn(
+      "competitors",
+      `Apify-failed requeue migration errored (non-fatal): ${err instanceof Error ? err.message : "?"}`
+    );
+  }
 
   let processed = 0;
   let succeeded = 0;
