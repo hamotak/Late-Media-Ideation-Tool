@@ -220,11 +220,12 @@ export async function extractFormatsFromOutliers(
     outliers.map((o) => [o.videoId, o.publishedAt ?? 0])
   );
 
-  // Post-LLM validation cascade (chained gates). Primary pass requires
-  // ≥2 distinct competitors per format. If that produces zero survivors,
-  // we re-run with the cross-channel gate relaxed to 1 distinct
-  // competitor — the survivors are then "author patterns" not "trends"
-  // and get flagged is_single_channel:true.
+  // Post-LLM validation cascade. Primary pass requires ≥2 distinct
+  // competitors per format. When the primary survivors fall below
+  // MIN_DESIRED_SURVIVORS we SUPPLEMENT (not replace) with a relaxed
+  // single-channel pass — any template the primary didn't already cover
+  // is added with isSingleChannel:true so the agent can flag it "author
+  // pattern". Cap the merged set at MAX_TRENDING_FORMATS.
   const primary = validateAndDedupFormats(
     rawParsed,
     titleByVideo,
@@ -232,10 +233,16 @@ export async function extractFormatsFromOutliers(
     multByVideo,
     competitorByVideo
   );
-  let parsed = primary.formats;
-  let fallbackUsed = false;
+  const parsed: Array<{
+    template: string;
+    videoIds: string[];
+    isSingleChannel: boolean;
+  }> = primary.formats.map((f) => ({ ...f, isSingleChannel: false }));
+  let primarySurvivors = parsed.length;
+  let supplementedSingleChannel = 0;
   let finalDropCounts = primary.dropCounts;
-  if (parsed.length === 0) {
+  let fallbackUsed = false;
+  if (primary.formats.length < MIN_DESIRED_SURVIVORS) {
     const relaxed = validateAndDedupFormats(
       rawParsed,
       titleByVideo,
@@ -244,22 +251,35 @@ export async function extractFormatsFromOutliers(
       competitorByVideo,
       { minDistinctCompetitors: 1 }
     );
-    if (relaxed.formats.length > 0) {
-      parsed = relaxed.formats;
-      fallbackUsed = true;
+    const seenTemplates = new Set(parsed.map((f) => f.template));
+    for (const f of relaxed.formats) {
+      if (parsed.length >= MAX_TRENDING_FORMATS) break;
+      if (seenTemplates.has(f.template)) continue;
+      parsed.push({ ...f, isSingleChannel: true });
+      seenTemplates.add(f.template);
+      supplementedSingleChannel++;
+    }
+    if (supplementedSingleChannel > 0) {
+      // When supplementation fired the relaxed-pass drop counts cover a
+      // strict superset of the primary attrition (same gates, just with
+      // the cross-channel gate at ≥1). Use those for the diag log so the
+      // reported per-gate totals reflect the broader pass we actually
+      // shipped survivors from.
       finalDropCounts = relaxed.dropCounts;
+      fallbackUsed = primary.formats.length === 0;
       log.info(
         "claude",
-        `Format-extract ${channelId}: primary pass yielded 0; relaxed fallback (single-channel allowed) yielded ${parsed.length} formats`
+        `Format-extract ${channelId}: primary pass yielded ${primary.formats.length} (< ${MIN_DESIRED_SURVIVORS}); supplemented ${supplementedSingleChannel} single-channel templates (total ${parsed.length})`
       );
     }
   }
 
   // T3: structured per-gate diagnostic log. The page toast quotes the
   // dominant drop reason when survivors are thin — surface it here too
-  // so HAmo can grep the app_logs table.
+  // so HAmo can grep the app_logs table. With supplementation the line
+  // also reports primary vs single-channel counts so it's obvious
+  // whether the cross-channel pool was thin.
   const candidates = rawParsed.length;
-  const totalDropped = Object.values(finalDropCounts).reduce((s, n) => s + n, 0);
   const dropEntries = Object.entries(finalDropCounts) as Array<
     [keyof FormatDropCounts, number]
   >;
@@ -270,7 +290,7 @@ export async function extractFormatsFromOutliers(
     topDropEntry ? { gate: topDropEntry[0], count: topDropEntry[1] } : null;
   log.info(
     "claude",
-    `[diag] format_extraction channel=${channelId}: candidates=${candidates}, dropped_by_slot_count=${finalDropCounts.slot_count}, dropped_by_literal_anchor=${finalDropCounts.literal_anchor}, dropped_by_per_example_multiplier=${finalDropCounts.per_example_multiplier}, dropped_by_min_examples=${finalDropCounts.min_examples}, dropped_by_avg_multiplier=${finalDropCounts.avg_multiplier}, dropped_by_cross_channel=${finalDropCounts.cross_channel}, dropped_by_lexical_overlap=${finalDropCounts.lexical_overlap}, survivors=${parsed.length}${fallbackUsed ? " (FALLBACK single-channel)" : ""}`
+    `[diag] format_extraction channel=${channelId} primary_survivors=${primarySurvivors} supplemented_single_channel=${supplementedSingleChannel} total=${parsed.length} candidates=${candidates} drops={slot_count:${finalDropCounts.slot_count},literal_anchor:${finalDropCounts.literal_anchor},per_example_multiplier:${finalDropCounts.per_example_multiplier},min_examples:${finalDropCounts.min_examples},avg_multiplier:${finalDropCounts.avg_multiplier},cross_channel:${finalDropCounts.cross_channel},lexical_overlap:${finalDropCounts.lexical_overlap}}`
   );
 
   if (parsed.length === 0) {
@@ -352,7 +372,11 @@ export async function extractFormatsFromOutliers(
       totalViewsMonth,
       risingRate: Number(risingRate.toFixed(2)),
       model,
-      isSingleChannel: fallbackUsed,
+      // Per-format flag now — set true for templates that only survived
+      // the relaxed (single-channel) pass; false for cross-channel
+      // proven survivors from the primary pass. Replaces the prior
+      // global `fallbackUsed` flag that tagged every row identically.
+      isSingleChannel: f.isSingleChannel,
     });
     if (formatId < 0) continue;
 
@@ -456,6 +480,13 @@ export function getFormatsForChannel(
  * Per-criterion drop counts logged so HAmo can see which gate fired.
  */
 const MAX_TRENDING_FORMATS = 8;
+// Floor below which we supplement the primary (cross-channel) survivors
+// with single-channel "author patterns" from the relaxed pass. Goal: give
+// the ideation pipeline ≥5 formats to fan out across topic clusters so
+// every cluster gets a distinct format paired against it. The old binary
+// "if zero, run fallback" wiring meant Late Science could ship one
+// cross-channel format and silently starve generate_ideas of variety.
+const MIN_DESIRED_SURVIVORS = 5;
 // Soften pass (T1 of follow-up PR): the prior cc7ef77 gates (≥3× per
 // example, ≥5× avg, ≤50% lexical overlap, ≥3 examples) were rejecting
 // nearly every candidate on HAmo's current 4-competitor pool. New
