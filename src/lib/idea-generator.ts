@@ -2,17 +2,25 @@ import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   db,
+  getCached,
   getCompetitorVideosByIds,
   getIntegration,
   listAllChannels,
   listChannelMemory,
   listMyWinners,
   resolveChannelDescription,
+  setCached,
   type Channel,
 } from "./db";
+import { exaSearch, type ExaResult } from "./exa";
 import { getFormatsForChannel } from "./outlier-formats";
 import { listOutliersForActiveChannel } from "./outliers";
 import { log } from "./logger";
+import {
+  extractSubredditMentions,
+  fetchTopAcrossSubs,
+  type RedditPost,
+} from "./reddit";
 
 // ---------------------------------------------------------------------------
 // Numbered-titles-only pipeline (2026-05 strip).
@@ -97,18 +105,41 @@ export type DroppedIdea = {
     | "banned_topic"
     | "exact_copy_of_source"
     | "topic_overused"
-    | "title_dup";
+    | "title_dup"
+    | "no_real_source";
   detail?: string;
+};
+
+// One "event" the model can cite. Sourced from Reddit (top weekly posts
+// in the channel's subreddits) and Exa (NASA/arxiv/ESA news queries).
+// Each carries a short eventId the model emits in sourceEventIds[] per
+// title so the explain-idea follow-up can resolve URLs without round-
+// tripping the bundle.
+export type EventCard = {
+  eventId: string;
+  source: "reddit" | "web";
+  title: string;
+  url: string;
+  snippet: string;
+  // Sub-source detail — subreddit name for Reddit, domain for web.
+  context: string;
+  publishedAt: number | null; // unix seconds; null when source lacks a date
 };
 
 export type ProposedIdea = {
   proposedTitle: string;
-  // Optional diag fields — the model MAY emit these alongside the title
-  // for our internal app_logs trace. They are NEVER surfaced in chat
-  // output (the agent renders only the numbered title list).
+  // Optional model-emitted diag fields. They are NEVER surfaced on the
+  // initial render (numbered titles only). The explain-idea follow-up
+  // path surfaces sourceEvents resolved to URLs.
   sourceTopicVideoId?: string | null;
   sourceFormatId?: number | null;
   coherenceRationale?: string | null;
+  // Real-event citations the model assigned to this title. ≥1 entry
+  // required when the research bundle is non-empty (else dropped with
+  // reason "no_real_source"). Resolved against the bundle so the agent
+  // can render URLs directly on the explain follow-up.
+  sourceEventIds?: string[];
+  sourceEvents?: EventCard[];
 };
 
 export type Idea = ProposedIdea;
@@ -119,6 +150,7 @@ export type PipelineFailure = {
   outliers_pulled: number;
   formats_pulled: number;
   own_winners_pulled: number;
+  research_events_pulled: number;
   passes_run: number;
   compose_total_returned: number;
   post_filter_survivors: number;
@@ -216,18 +248,33 @@ export async function generateIdeasForChannel(opts: {
   // 4. Last 20 own uploads for frequency awareness.
   const recentOwn = loadRecentOwnUploads(userChannelId, OWN_RECENT_LIMIT);
 
+  const ctx = {
+    description: resolveChannelDescription(channel as unknown as Channel),
+    ideationRules: ((channel as unknown as Channel).ideation_rules ?? "").trim(),
+    channelTitle: (channel as unknown as Channel).title ?? "this channel",
+  };
+
+  // 5. Research pre-pass — Reddit + Exa. Cached for 6h per channel.
+  // Every proposed title MUST cite at least one event from this bundle
+  // when the bundle is non-empty; the model emits sourceEventIds[] per
+  // title and the post-filter drops titles missing an attribution.
+  const research = await loadResearchBundle({
+    userChannelId,
+    channelDescription: ctx.description,
+  });
+
   log.info(
     "claude",
-    `[diag] ideation_inputs channel=${userChannelId} outliers=${outliers.length} formats=${formatCandidates.length} winners=${ownWinners.length} recent_own=${recentOwn.length}`
+    `[diag] ideation_inputs channel=${userChannelId} outliers=${outliers.length} formats=${formatCandidates.length} winners=${ownWinners.length} recent_own=${recentOwn.length} events=${research.events.length}`
   );
 
-  // Up-front fail-fast: if no outliers and no winners and no formats, we
-  // genuinely have nothing to feed Opus. Return a pipeline_failure so the
-  // chat agent can ask HAmo to sync more competitors.
+  // Up-front fail-fast: if no outliers and no winners and no formats and
+  // no research events, we genuinely have nothing to feed Opus.
   if (
     outliers.length === 0 &&
     ownWinners.length === 0 &&
-    formatCandidates.length === 0
+    formatCandidates.length === 0 &&
+    research.events.length === 0
   ) {
     return {
       ok: true,
@@ -241,20 +288,15 @@ export async function generateIdeasForChannel(opts: {
         outliers_pulled: 0,
         formats_pulled: 0,
         own_winners_pulled: 0,
+        research_events_pulled: 0,
         passes_run: 0,
         compose_total_returned: 0,
         post_filter_survivors: 0,
         fail_reason:
-          "Nothing in the source pool: no competitor outliers, no own-channel winners, no extracted formats. Sync competitors or re-extract trending formats first.",
+          "Nothing in the source pool: no competitor outliers, no own-channel winners, no extracted formats, and no research events (Reddit/Exa returned empty). Sync competitors, re-extract trending formats, or add an Exa API key.",
       },
     };
   }
-
-  const ctx = {
-    description: resolveChannelDescription(channel as unknown as Channel),
-    ideationRules: ((channel as unknown as Channel).ideation_rules ?? "").trim(),
-    channelTitle: (channel as unknown as Channel).title ?? "this channel",
-  };
 
   // Build the source-id set used by the originality (exact-copy) check.
   const sourceTitleSet = new Set<string>([
@@ -275,6 +317,13 @@ export async function generateIdeasForChannel(opts: {
   const rejectedHistory: Array<{ title: string; reason: string }> = [];
   let lastFailureNote: string | null = null;
 
+  // Build the event-id set for the source-citation gate. When the
+  // bundle has at least one event, every shipped title MUST cite at
+  // least one valid id; the post-filter drops misses as
+  // "no_real_source" and the next pass re-prompts.
+  const knownEventIds = new Set(research.events.map((e) => e.eventId));
+  const eventById = new Map(research.events.map((e) => [e.eventId, e]));
+
   for (let pass = 1; pass <= MAX_COMPOSE_PASSES; pass++) {
     if (survivors.length >= MIN_TITLES_TO_SHIP) break;
     const compose = await runComposeCall({
@@ -286,6 +335,7 @@ export async function generateIdeasForChannel(opts: {
       ownWinners,
       formatCandidates,
       recentOwn,
+      events: research.events,
       bannedTopics,
       rejected: rejectedHistory.slice(-15),
       survivorsSoFar: survivors,
@@ -308,6 +358,7 @@ export async function generateIdeasForChannel(opts: {
         title: i.proposedTitle,
         topic: i.sourceTopicVideoId ?? null,
         format: i.sourceFormatId ?? null,
+        events: i.sourceEventIds ?? null,
         rationale: i.coherenceRationale ?? null,
       })))}`
     );
@@ -331,7 +382,39 @@ export async function generateIdeasForChannel(opts: {
         });
         continue;
       }
-      survivors.push(idea);
+      // Source-citation gate — only when the research bundle actually
+      // produced events. If the bundle is empty (Reddit + Exa both
+      // unavailable) we ship without the gate so the pipeline isn't
+      // bricked by an external outage.
+      let resolvedEvents: EventCard[] | undefined;
+      if (knownEventIds.size > 0) {
+        const ids = (idea.sourceEventIds ?? [])
+          .map((id) => (typeof id === "string" ? id.trim() : ""))
+          .filter((id) => knownEventIds.has(id));
+        if (ids.length === 0) {
+          dropped.push({
+            proposedTitle: idea.proposedTitle,
+            reason: "no_real_source",
+            detail:
+              "title did not cite any event id from the research bundle",
+          });
+          rejectedHistory.push({
+            title: idea.proposedTitle,
+            reason: "no_real_source: cite at least one event id from the REAL EVENT SOURCES block",
+          });
+          continue;
+        }
+        resolvedEvents = ids
+          .map((id) => eventById.get(id))
+          .filter((e): e is EventCard => !!e);
+      }
+      survivors.push({
+        ...idea,
+        sourceEventIds: resolvedEvents
+          ? resolvedEvents.map((e) => e.eventId)
+          : idea.sourceEventIds,
+        sourceEvents: resolvedEvents,
+      });
     }
 
     log.info(
@@ -349,6 +432,7 @@ export async function generateIdeasForChannel(opts: {
       outliers_pulled: outliers.length,
       formats_pulled: formatCandidates.length,
       own_winners_pulled: ownWinners.length,
+      research_events_pulled: research.events.length,
       passes_run: passesRun,
       compose_total_returned: composeTotalReturned,
       post_filter_survivors: finalIdeas.length,
@@ -544,6 +628,170 @@ function loadRecentOwnUploads(channelId: string, limit: number): RecentOwn[] {
 }
 
 // ---------------------------------------------------------------------------
+// Research pre-pass — Reddit (no auth) + Exa (web search) → event bundle
+// ---------------------------------------------------------------------------
+
+// Default subreddits when the channel description doesn't name any. Space-
+// science skew because every channel HAmo currently runs is in that orbit;
+// if a non-space niche shows up later we'll either parse niche keywords
+// out of the description or expose a settings knob.
+const DEFAULT_SUBREDDITS = ["space", "astronomy", "cosmology", "Physics"];
+
+// Cache TTL — 6h matches the spec. Two ideation turns in the same window
+// reuse the bundle so we don't burn Exa credit re-running identical queries.
+const RESEARCH_CACHE_TTL_SECONDS = 6 * 3600;
+
+export type ResearchBundle = {
+  redditPosts: RedditPost[];
+  webResults: ExaResult[];
+  events: EventCard[];
+  cachedAt: number;
+};
+
+function topContentNouns(text: string, n: number): string[] {
+  const stop = STOPWORDS;
+  const counts = new Map<string, number>();
+  for (const raw of (text ?? "")
+    .toLowerCase()
+    .replace(/[^a-zа-яёіїєґ0-9 ]+/giu, " ")
+    .split(/\s+/)) {
+    if (!raw || raw.length < 4) continue;
+    if (stop.has(raw)) continue;
+    counts.set(raw, (counts.get(raw) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([t]) => t);
+}
+
+function buildResearchQueries(nicheKeywords: string): string[] {
+  const niche = nicheKeywords.trim();
+  const queries = [
+    "NASA JPL news last 7 days",
+    `arxiv astro-ph recent submissions ${niche}`.trim(),
+    "James Webb OR Voyager OR ESA news this week",
+  ];
+  return queries.map((q) => q.replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+function eventDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "(unknown)";
+  }
+}
+
+export async function loadResearchBundle(opts: {
+  userChannelId: string;
+  channelDescription: string;
+}): Promise<ResearchBundle> {
+  const cacheKey = `ideation_research:${opts.userChannelId}`;
+  const cached = getCached<ResearchBundle>(cacheKey);
+  if (cached) {
+    log.info(
+      "claude",
+      `[diag] ideation_research channel=${opts.userChannelId} cache=hit reddit=${cached.redditPosts.length} web=${cached.webResults.length} events=${cached.events.length}`
+    );
+    return cached;
+  }
+
+  const mentioned = extractSubredditMentions(opts.channelDescription ?? "");
+  const subreddits = mentioned.length > 0 ? mentioned : DEFAULT_SUBREDDITS;
+  const nicheKeywords = topContentNouns(opts.channelDescription ?? "", 5).join(" ");
+
+  let redditPosts: RedditPost[] = [];
+  try {
+    redditPosts = await fetchTopAcrossSubs(subreddits, {
+      perSubLimit: 10,
+      totalLimit: 20,
+      timeframe: "week",
+    });
+  } catch (err) {
+    log.warn(
+      "claude",
+      `[diag] ideation_research reddit fetch failed: ${err instanceof Error ? err.message : "?"}`
+    );
+  }
+
+  let webResults: ExaResult[] = [];
+  const exaKey = getIntegration("exa")?.api_key;
+  if (exaKey) {
+    const queries = buildResearchQueries(nicheKeywords);
+    const settled = await Promise.allSettled(
+      queries.map((q) =>
+        exaSearch(q, exaKey, { numResults: 10, includeText: true })
+      )
+    );
+    const seen = new Set<string>();
+    for (const r of settled) {
+      if (r.status !== "fulfilled") {
+        log.warn(
+          "claude",
+          `[diag] ideation_research exa query failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`
+        );
+        continue;
+      }
+      for (const item of r.value) {
+        if (!item.url || seen.has(item.url)) continue;
+        seen.add(item.url);
+        webResults.push(item);
+      }
+    }
+  } else {
+    log.warn(
+      "claude",
+      `[diag] ideation_research exa key missing — web results will be empty (Reddit still attempted)`
+    );
+  }
+
+  const events: EventCard[] = [];
+  redditPosts.forEach((p, i) => {
+    events.push({
+      eventId: `r${i + 1}`,
+      source: "reddit",
+      title: p.title,
+      url: p.url,
+      snippet:
+        p.selftextPreview && p.selftextPreview.length > 0
+          ? p.selftextPreview
+          : `r/${p.subreddit} · score ${p.score} · ${p.numComments} comments`,
+      context: `r/${p.subreddit}`,
+      publishedAt: p.createdUtc > 0 ? p.createdUtc : null,
+    });
+  });
+  webResults.forEach((w, i) => {
+    events.push({
+      eventId: `w${i + 1}`,
+      source: "web",
+      title: w.title || "(untitled)",
+      url: w.url,
+      snippet: (w.text ?? "").slice(0, 280),
+      context: eventDomain(w.url),
+      publishedAt: w.publishedDate
+        ? Math.floor(Date.parse(w.publishedDate) / 1000) || null
+        : null,
+    });
+  });
+
+  const bundle: ResearchBundle = {
+    redditPosts,
+    webResults,
+    events,
+    cachedAt: Math.floor(Date.now() / 1000),
+  };
+  if (events.length > 0) {
+    setCached(cacheKey, bundle, RESEARCH_CACHE_TTL_SECONDS);
+  }
+  log.info(
+    "claude",
+    `[diag] ideation_research channel=${opts.userChannelId} cache=miss reddit=${redditPosts.length} web=${webResults.length} events=${events.length} subs=${subreddits.join(",")} niche=${JSON.stringify(nicheKeywords)}`
+  );
+  return bundle;
+}
+
+// ---------------------------------------------------------------------------
 // Post-LLM filters
 // ---------------------------------------------------------------------------
 
@@ -654,6 +902,11 @@ type ComposeOutput = {
   sourceTopicVideoId?: string | null;
   sourceFormatId?: number | null;
   coherenceRationale?: string | null;
+  // Event-id citations from the research bundle ("r3", "w7", …). The
+  // post-filter resolves these to URLs via the bundle and drops titles
+  // that don't reference at least one valid id when the bundle is
+  // non-empty.
+  sourceEventIds?: string[];
 };
 
 type ComposeResult =
@@ -669,6 +922,7 @@ async function runComposeCall(opts: {
   ownWinners: ReturnType<typeof listMyWinners>;
   formatCandidates: FormatCandidate[];
   recentOwn: RecentOwn[];
+  events: EventCard[];
   bannedTopics: string[];
   rejected: Array<{ title: string; reason: string }>;
   survivorsSoFar: ProposedIdea[];
@@ -713,6 +967,7 @@ function buildComposeSystemPrompt(opts: {
   pass: number;
   ctx: { description: string; ideationRules: string; channelTitle: string };
   bannedTopics: string[];
+  events: EventCard[];
   targetCount: number;
 }): string {
   const lines: string[] = [];
@@ -726,6 +981,7 @@ function buildComposeSystemPrompt(opts: {
   lines.push('  "titles": [');
   lines.push("    {");
   lines.push('      "title": string,                  // REQUIRED. 50-80 chars. Plain language. No jargon. No banned words. No exact copy of a source title.');
+  lines.push('      "sourceEventIds": string[],       // REQUIRED when REAL EVENT SOURCES is non-empty. 1-3 entries. Each MUST be an exact eventId from the bundle (e.g. "r3", "w7"). The title must be a faithful reframing of those events — no fabricated facts.');
   lines.push('      "sourceTopicVideoId": string|null, // OPTIONAL — the outlier id you riffed off, for our internal logs.');
   lines.push('      "sourceFormatId": number|null,     // OPTIONAL — the format template id you used, for our internal logs.');
   lines.push('      "rationale": string|null           // OPTIONAL — one short sentence (≤180 chars) on why this title fits THIS channel.');
@@ -741,6 +997,13 @@ function buildComposeSystemPrompt(opts: {
   lines.push("- NEVER use: cinematic, sensory, visceral, profound, desolate expanse, humanity has ever charted, humanity has ever mapped, inexorable, vastest, the most absolute, physically impossible.");
   lines.push("- NEVER copy a source title verbatim. The model picks a topic + a different shape — fabrications are out, but reframings are in.");
   lines.push("- NEVER repeat a topic the channel covered in its last 20 uploads (you'll see those below) unless you have a clearly fresh angle.");
+  if (opts.events.length > 0) {
+    lines.push("");
+    lines.push("# REAL-EVENT GROUNDING (NON-NEGOTIABLE)");
+    lines.push(
+      "Every proposed title MUST be traceable to at least one real event from the REAL EVENT SOURCES block below. Pick the event(s) you're riffing off and emit their eventIds in sourceEventIds[]. Reject your own draft if you can't point to a real event. We are NOT writing speculative dread headlines. We are remixing REAL recent news using the channel's voice + viral structural formats. Titles missing sourceEventIds — or citing ids that don't exist in the bundle — are dropped server-side."
+    );
+  }
   if (opts.bannedTopics.length > 0) {
     lines.push("");
     lines.push("# BANNED TOPICS (NEVER propose)");
@@ -769,6 +1032,7 @@ function buildComposeUserBody(opts: {
   ownWinners: ReturnType<typeof listMyWinners>;
   formatCandidates: FormatCandidate[];
   recentOwn: RecentOwn[];
+  events: EventCard[];
   rejected: Array<{ title: string; reason: string }>;
   survivorsSoFar: ProposedIdea[];
 }): string {
@@ -779,6 +1043,26 @@ function buildComposeUserBody(opts: {
       ? opts.ctx.description
       : "(not set)"
   );
+  if (opts.events.length > 0) {
+    lines.push("");
+    lines.push(`# REAL EVENT SOURCES (${opts.events.length}) — cite at least one eventId per title`);
+    for (const e of opts.events) {
+      const dateStr = e.publishedAt
+        ? new Date(e.publishedAt * 1000).toISOString().slice(0, 10)
+        : "(undated)";
+      const snippet = e.snippet
+        ? ` — ${e.snippet.replace(/\s+/g, " ").slice(0, 200)}`
+        : "";
+      lines.push(
+        `- ${e.eventId} [${e.source}|${e.context}|${dateStr}] ${e.title} (${e.url})${snippet}`
+      );
+    }
+  } else {
+    lines.push("");
+    lines.push(
+      "# REAL EVENT SOURCES — empty this turn (Reddit + Exa returned nothing). Ground titles in the outliers / winners / formats below; do not invent news."
+    );
+  }
   lines.push("");
   lines.push(`# COMPETITOR OUTLIERS (${opts.outliers.length})`);
   if (opts.outliers.length === 0) {
@@ -858,6 +1142,16 @@ function parseComposeOutput(raw: string): ComposeOutput[] | null {
       const o = entry as Record<string, unknown>;
       const title = typeof o.title === "string" ? o.title.trim() : "";
       if (!title) continue;
+      const eventIds: string[] = [];
+      const rawEventIds = o.sourceEventIds;
+      if (Array.isArray(rawEventIds)) {
+        for (const e of rawEventIds) {
+          if (typeof e === "string") {
+            const trimmed = e.trim();
+            if (trimmed) eventIds.push(trimmed);
+          }
+        }
+      }
       out.push({
         proposedTitle: title,
         sourceTopicVideoId:
@@ -875,6 +1169,7 @@ function parseComposeOutput(raw: string): ComposeOutput[] | null {
             : typeof o.coherenceRationale === "string"
               ? o.coherenceRationale.trim() || null
               : null,
+        sourceEventIds: eventIds.length > 0 ? eventIds : undefined,
       });
     }
   }
