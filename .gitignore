@@ -63,5 +63,9 @@ next-env.d.ts
 # always rebuild on demand; never check in to the tree.
 scripts/verification/
 
+# Captured stdout from `npm run build` — regenerated on every build,
+# no value in version control.
+build.log
+
 # Claude Code session state (PID + acquired timestamp)
 .claude/scheduled_tasks.lock
