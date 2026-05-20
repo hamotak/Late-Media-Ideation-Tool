@@ -163,9 +163,7 @@ export function Sidebar() {
 
   const settingsSubItems: { href: string; label: string }[] = [
     { href: "/settings/integrations", label: "Integrations" },
-    { href: "/settings/import", label: "Import" },
     { href: "/settings/logs", label: "Logs" },
-    { href: "/settings/alerts", label: "Alerts" },
   ];
   const isOnSettings =
     pathname === "/settings" || pathname.startsWith("/settings/");

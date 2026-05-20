@@ -164,10 +164,9 @@ export default function DashboardPage() {
             <CardDescription>{t.dashboard.noData}</CardDescription>
           </CardHeader>
           <CardContent>
-            <Link href="/settings/import">
+            <Link href="/settings/integrations">
               <Button size="sm" className="gap-2">
-                <Upload className="h-4 w-4" />
-                {t.nav.import}
+                Bind channel
               </Button>
             </Link>
           </CardContent>

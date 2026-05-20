@@ -57,9 +57,8 @@ export async function DELETE(
   if (!Number.isFinite(competitorId)) {
     return NextResponse.json({ error: "invalid id" }, { status: 400 });
   }
-  // ON DELETE CASCADE wipes competitor_videos, competitor_alerts,
-  // competitor_video_excludes and outlier_explanations referencing
-  // this competitor.
+  // ON DELETE CASCADE wipes competitor_videos and
+  // competitor_video_excludes referencing this competitor.
   deleteCompetitor(competitorId);
   return NextResponse.json({ ok: true });
 }

@@ -6,7 +6,6 @@ import {
   getCompetitor,
   getIntegration,
   getSetting,
-  recordCompetitorAlert,
   setSetting,
   updateCompetitorAfterSync,
   upsertCompetitorVideo,
@@ -31,7 +30,6 @@ import {
 // multiplier (1.5×, 2×, 3×, 5×, 10×). If generation also stopped at 2× the
 // 1.5× pill would always show 0 results. 1.5× generation + 2× default
 // filter = methodology preserved at the surface, with an opt-in wider bucket.
-const OUTLIER_MULTIPLIER = 1.5;
 
 // How many videos to pull per sync. 50 covers most channels' recent
 // activity without burning quota; matches the new pipeline's
@@ -104,7 +102,6 @@ function extractVideoId(url: string | undefined, fallback: string | undefined): 
 export type SyncResult = {
   videosSeen: number;
   videosInserted: number;
-  newAlerts: number;
   channelTitle: string | null;
   medianViews: number;
 };
@@ -237,28 +234,11 @@ export async function syncCompetitorViaYouTube(
   }
   updateCompetitorAfterSync(competitorId, channelMetaPatch);
 
-  // Outlier scan — runs AFTER inserts so the median reflects the new rows.
+  // Median is still computed so callers know the outlier threshold for
+  // their own UI / pipeline analytics. The legacy competitor_alerts
+  // write was removed when /settings/alerts was deleted — outliers are
+  // surfaced live by the ideation pipeline + Content Themes card now.
   const median = competitorMedianViews(competitorId);
-  let newAlerts = 0;
-  if (median > 0) {
-    for (const v of videos) {
-      if (!v.id || !v.title || !v.views) continue;
-      const multiplier = v.views / median;
-      if (multiplier >= OUTLIER_MULTIPLIER) {
-        recordCompetitorAlert({
-          competitor_id: competitorId,
-          video_id: v.id,
-          title: v.title,
-          thumbnail_url:
-            v.thumbnail ?? `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`,
-          views: v.views,
-          channel_median_views: median,
-          multiplier: Math.round(multiplier * 10) / 10,
-        });
-        newAlerts++;
-      }
-    }
-  }
 
   log.info(
     "competitors",
@@ -268,7 +248,6 @@ export async function syncCompetitorViaYouTube(
     competitorId,
     videosSeen: videos.length,
     videosInserted,
-    newAlerts,
     medianViews: median,
     quotaUnits,
     durationMs: Date.now() - startedAt,
@@ -277,7 +256,6 @@ export async function syncCompetitorViaYouTube(
   return {
     videosSeen: videos.length,
     videosInserted,
-    newAlerts,
     channelTitle: resolved.title ?? competitor.title ?? null,
     medianViews: median,
   };

@@ -77,11 +77,7 @@ export const config = {
   //     background requests bouncing off 401s in some browsers)
   //   - /api/health — Railway's healthcheck probe ships no auth headers,
   //     so without this exemption the deploy never goes live
-  //   - /api/alerts/poll — external cron services (cron-job.org etc.) hit
-  //     this every ~15 min and can't easily ship Basic Auth headers; the
-  //     route handler enforces its own `ALERTS_CRON_SECRET` query-param
-  //     check, so this exemption is safe (defence-in-depth there).
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|api/health|api/alerts/poll).*)",
+    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|api/health).*)",
   ],
 };

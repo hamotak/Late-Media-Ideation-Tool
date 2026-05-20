@@ -5,17 +5,16 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
 /**
- * Shared layout for /settings and its sub-tabs (/settings/integrations,
- * /settings/import, /settings/logs). Renders the page-level "Settings"
- * heading and a tab strip; each tab is a real URL so back/forward and
- * deep links work without client-side state.
+ * Shared layout for /settings sub-tabs (/settings/integrations,
+ * /settings/logs). Renders the page-level "Settings" heading and a tab
+ * strip; each tab is a real URL so back/forward and deep links work
+ * without client-side state. The /settings index redirects to
+ * /settings/integrations so the sidebar "Settings" item lands on the
+ * first real tab.
  */
 const TABS = [
-  { href: "/settings", label: "Preferences" },
   { href: "/settings/integrations", label: "Integrations" },
-  { href: "/settings/import", label: "Import" },
   { href: "/settings/logs", label: "Logs" },
-  { href: "/settings/alerts", label: "Alerts" },
 ] as const;
 
 export default function SettingsLayout({
@@ -40,11 +39,10 @@ export default function SettingsLayout({
 
 function TabLink({ href, label }: { href: string; label: string }) {
   const pathname = usePathname();
-  // The Preferences tab lives at the exact /settings path; the other
-  // three each own a /settings/<x> subtree. usePathname is stable across
-  // client-side navigation, so back/forward update the highlight too.
-  const active =
-    href === "/settings" ? pathname === "/settings" : pathname.startsWith(href);
+  // Both surviving tabs own a /settings/<x> subtree, so prefix match is
+  // enough; usePathname is stable across client-side navigation, so
+  // back/forward update the highlight too.
+  const active = pathname.startsWith(href);
   return (
     <Link
       href={href}

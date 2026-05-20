@@ -260,20 +260,19 @@ function EarningsBody({ bundle }: { bundle: Bundle }) {
         </div>
       </div>
 
-      {/* RPM — what the channel earns per 1,000 views, after YouTube's cut.
-          Computed client-side from the same monetary bundle we already fetch
-          (no new endpoint). Falls back to $0 when views == 0 to avoid NaN. */}
+      {/* RPM — what the channel earns per 1,000 playbacks, after YouTube's
+          cut. We use the YT Analytics `playbackBasedCpm` field directly
+          rather than dividing revenue by a raw `views` count — `views`
+          isn't part of the monetary bundle (would require a second
+          report), and `playbackBasedCpm` is exactly the same metric
+          (USD per 1,000 playbacks) computed server-side by Google. */}
       <div className="rounded-lg border bg-card p-3">
         <div className="text-[10px] uppercase text-muted-foreground">RPM</div>
         <div className="mt-1 text-2xl font-bold tabular-nums">
-          {fmtUsd(
-            bundle.totals.views > 0
-              ? (bundle.totals.estimatedRevenue / bundle.totals.views) * 1000
-              : 0
-          )}
+          {fmtUsd(bundle.totals.playbackBasedCpm ?? 0)}
         </div>
         <div className="mt-1 text-[11px] text-muted-foreground">
-          Revenue per 1,000 views
+          Revenue per 1,000 playbacks
         </div>
       </div>
     </div>

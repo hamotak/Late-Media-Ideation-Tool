@@ -247,14 +247,22 @@ try {
   db.exec(`DROP TABLE IF EXISTS hooks_library`);
   // T1 deletions — /chat and /outliers surfaces removed in 2026-05. Run
   // before any of the surviving schema is created (no FK references from
-  // any surviving table). competitor_videos / competitor_alerts /
-  // competitor_video_excludes are KEPT — the new pipeline doesn't read
-  // them but they're still populated by competitor-sync.
+  // any surviving table).
   db.exec(`DROP TABLE IF EXISTS chat_messages`);
   db.exec(`DROP TABLE IF EXISTS chat_sessions`);
   db.exec(`DROP TABLE IF EXISTS outlier_format_videos`);
   db.exec(`DROP TABLE IF EXISTS outlier_formats`);
   db.exec(`DROP TABLE IF EXISTS outlier_explanations`);
+  // Pre-deploy cleanup — /settings/{alerts,import,preferences} removed.
+  // alert_fires is dropped BEFORE alert_rules because it has a FK on
+  // rule_id ON DELETE CASCADE; SQLite tolerates either order for IF
+  // EXISTS but the safer-looking order matches the dependency chain.
+  db.exec(`DROP TABLE IF EXISTS alert_fires`);
+  db.exec(`DROP TABLE IF EXISTS alert_state`);
+  db.exec(`DROP TABLE IF EXISTS alert_rules`);
+  db.exec(`DROP TABLE IF EXISTS competitor_alerts`);
+  db.exec(`DROP TABLE IF EXISTS alerts`);
+  db.exec(`DROP TABLE IF EXISTS user_preferences`);
 } catch {
   /* table didn't exist or rare concurrent issue — moving on either way */
 }
@@ -1158,18 +1166,13 @@ export function removeChannel(channelId: string): {
 
     db.prepare(`DELETE FROM channels WHERE id = ?`).run(id);
 
-    // Snapshots / alert state aren't FK-linked.
+    // Snapshots aren't FK-linked; clean them up explicitly so a
+    // re-imported channel doesn't see stale velocity data.
     if (doomed.length > 0) {
       const ids = doomed.map((r) => r.id);
       const placeholders = ids.map(() => "?").join(",");
       db.prepare(
         `DELETE FROM video_view_snapshots WHERE video_id IN (${placeholders})`
-      ).run(...ids);
-      db.prepare(
-        `DELETE FROM alert_state WHERE video_id IN (${placeholders})`
-      ).run(...ids);
-      db.prepare(
-        `DELETE FROM alert_fires WHERE video_id IN (${placeholders})`
       ).run(...ids);
     }
 
@@ -1640,66 +1643,6 @@ db.exec(`
     comments INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_view_snapshots_video_ts ON video_view_snapshots(video_id, ts DESC);
-
-  -- Per-video alert state. Records when we last fired so we don't spam
-  -- on every poll while velocity stays elevated. Kept around for the
-  -- legacy single-rule path; the new multi-rule engine uses
-  -- alert_fires (below) which is keyed by (rule_id, video_id).
-  CREATE TABLE IF NOT EXISTS alert_state (
-    video_id TEXT PRIMARY KEY,
-    last_fired_at INTEGER NOT NULL,
-    last_velocity REAL NOT NULL
-  );
-
-  -- User-defined alert rules. Replaces the old single-threshold model.
-  -- Each rule combines (metric × comparison × threshold) so the user
-  -- can stack as many notifications as they want — e.g. one rule for
-  -- "views/hour > 500" plus a separate one for "total views ≥ 100k"
-  -- plus another for "comments delta in last 6h ≥ 50".
-  --
-  -- type:        "velocity" - (current - prior) / hours_elapsed >= threshold
-  --              "total_milestone" - current >= threshold, fires once per video
-  --              "delta_window" - current - prior_within_window >= threshold
-  -- metric:      "views" | "likes" | "comments"
-  -- scope:       "recent_n" — most recent N uploads (scope_value = N)
-  --              "all" — every video in the active channel
-  -- channel_id:  null = monitor whichever channel is active at poll time;
-  --              specific id = always evaluate against that channel.
-  -- cooldown_minutes: don't re-fire the same rule on the same video
-  --              more often than this; ignored when fire_once is 1.
-  -- fire_once:   for milestones — fire exactly once per video per rule
-  --              (crossing 100k views shouldn't ping every poll forever).
-  CREATE TABLE IF NOT EXISTS alert_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    name TEXT NOT NULL,
-    type TEXT NOT NULL,
-    metric TEXT NOT NULL,
-    threshold REAL NOT NULL,
-    window_minutes INTEGER,
-    scope TEXT NOT NULL DEFAULT 'recent_n',
-    scope_value INTEGER,
-    channel_id TEXT,
-    cooldown_minutes INTEGER NOT NULL DEFAULT 60,
-    fire_once INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-  );
-
-  -- One row per rule firing. Used both for the cooldown / fire_once
-  -- gates and so we can show a recent-alerts feed in the UI.
-  CREATE TABLE IF NOT EXISTS alert_fires (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rule_id INTEGER NOT NULL,
-    video_id TEXT NOT NULL,
-    fired_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    metric_value REAL,
-    delivered INTEGER NOT NULL DEFAULT 1,
-    error TEXT,
-    FOREIGN KEY (rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE
-  );
-  CREATE INDEX IF NOT EXISTS idx_alert_fires_rule_video ON alert_fires (rule_id, video_id, fired_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_alert_fires_recent ON alert_fires (fired_at DESC);
 `);
 
 // Backfill the snapshot table on existing installs — they pre-date the
@@ -2873,24 +2816,6 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_comp_videos_views ON competitor_videos(competitor_id, views DESC);
 
-  -- Auto-detected viral hits we surface as Alerts. One row per
-  -- (competitor, video) pair; re-detection is idempotent on PK conflict.
-  CREATE TABLE IF NOT EXISTS competitor_alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    competitor_id INTEGER NOT NULL,
-    video_id TEXT NOT NULL,
-    title TEXT,
-    thumbnail_url TEXT,
-    views INTEGER,
-    channel_median_views INTEGER,
-    multiplier REAL,
-    detected_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    read_at INTEGER,
-    UNIQUE(competitor_id, video_id),
-    FOREIGN KEY (competitor_id) REFERENCES competitors(id) ON DELETE CASCADE
-  );
-  CREATE INDEX IF NOT EXISTS idx_comp_alerts_unread ON competitor_alerts(read_at, detected_at DESC);
-
   -- Per-user-channel hide list for outliers the user wants to suppress.
   -- A single row hides one (user_channel, video) pair across every surface
   -- that consumes outliers — Recent, Patterns extraction source, Topics
@@ -2920,8 +2845,8 @@ db.exec(`
 //
 // Critical detail: `DROP TABLE competitors` with foreign_keys=ON performs
 // an implicit `DELETE FROM competitors` first, which cascade-deletes all
-// rows in competitor_videos and competitor_alerts. PRAGMA defer_foreign_keys
-// only delays constraint *checks*, NOT cascade *actions* — so we MUST flip
+// rows in competitor_videos. PRAGMA defer_foreign_keys only delays
+// constraint *checks*, NOT cascade *actions* — so we MUST flip
 // foreign_keys=OFF for the duration of the rebuild. PRAGMA foreign_keys is
 // a no-op inside a transaction, so it is set OUTSIDE.
 //
@@ -3064,93 +2989,6 @@ try {
   }
 }
 
-// One-shot historical backfill: alert generation used to floor at 2× median;
-// it now floors at 1.5× (see OUTLIER_MULTIPLIER in competitor-sync.ts). Any
-// existing competitor_video at 1.5×–1.99× their channel's all-time median
-// was never promoted to an alert. Walk competitor_videos once, compute the
-// all-time median per competitor, and upsert qualifying rows into
-// competitor_alerts. Safe to re-run — UNIQUE(competitor_id, video_id) +
-// ON CONFLICT DO UPDATE on the table makes the upsert idempotent. Gated by
-// a settings flag so it only runs once per install. New competitors added
-// later flow through syncCompetitor which already uses 1.5×.
-{
-  const backfilled = getSetting("competitors.alerts_backfilled_1_5x") === "1";
-  if (!backfilled) {
-    try {
-      const rows = db
-        .prepare(
-          `WITH ordered AS (
-             SELECT competitor_id, video_id, views, title, thumbnail_url,
-                    ROW_NUMBER() OVER (PARTITION BY competitor_id ORDER BY views) AS rn,
-                    COUNT(*)     OVER (PARTITION BY competitor_id)                  AS cnt
-             FROM competitor_videos
-           ),
-           medians AS (
-             SELECT competitor_id, AVG(views) AS median_views
-             FROM ordered
-             WHERE rn IN ((cnt + 1) / 2, (cnt + 2) / 2)
-             GROUP BY competitor_id
-             HAVING AVG(views) > 0
-           )
-           SELECT v.competitor_id, v.video_id, v.title, v.thumbnail_url, v.views,
-                  m.median_views,
-                  (v.views * 1.0 / m.median_views) AS multiplier
-           FROM competitor_videos v
-           JOIN medians m ON m.competitor_id = v.competitor_id
-           WHERE v.views >= 1.5 * m.median_views`
-        )
-        .all() as Array<{
-          competitor_id: number;
-          video_id: string;
-          title: string | null;
-          thumbnail_url: string | null;
-          views: number;
-          median_views: number;
-          multiplier: number;
-        }>;
-
-      const insert = db.prepare(
-        `INSERT INTO competitor_alerts
-           (competitor_id, video_id, title, thumbnail_url, views, channel_median_views, multiplier)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(competitor_id, video_id) DO UPDATE SET
-           views                = excluded.views,
-           multiplier           = excluded.multiplier,
-           channel_median_views = excluded.channel_median_views`
-      );
-
-      const runAll = db.transaction(
-        (batch: typeof rows) => {
-          for (const r of batch) {
-            insert.run(
-              r.competitor_id,
-              r.video_id,
-              r.title,
-              r.thumbnail_url,
-              r.views,
-              Math.round(r.median_views),
-              Math.round(r.multiplier * 10) / 10
-            );
-          }
-        }
-      );
-      runAll(rows);
-
-      setSetting("competitors.alerts_backfilled_1_5x", "1");
-      // eslint-disable-next-line no-console
-      console.log(
-        `[db] competitor alerts 1.5× backfill: upserted ${rows.length} rows`
-      );
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[db] competitor alerts 1.5× backfill failed (will retry on next boot):",
-        err
-      );
-    }
-  }
-}
-
 export type CompetitorSyncStatus = "queued" | "syncing" | "synced" | "failed";
 
 export type Competitor = {
@@ -3193,19 +3031,6 @@ export type CompetitorVideo = {
   duration_seconds: number | null;
   published_at: number | null;
   synced_at: number;
-};
-
-export type CompetitorAlert = {
-  id: number;
-  competitor_id: number;
-  video_id: string;
-  title: string | null;
-  thumbnail_url: string | null;
-  views: number | null;
-  channel_median_views: number | null;
-  multiplier: number | null;
-  detected_at: number;
-  read_at: number | null;
 };
 
 /**
@@ -3468,7 +3293,7 @@ export function updateCompetitorAfterSync(
 }
 
 export function deleteCompetitor(id: number): void {
-  // ON DELETE CASCADE cleans up competitor_videos and competitor_alerts.
+  // ON DELETE CASCADE cleans up competitor_videos.
   db.prepare(`DELETE FROM competitors WHERE id = ?`).run(id);
 }
 
@@ -3792,133 +3617,6 @@ export function competitorMedianViews(competitorId: number): number {
     )
     .get(competitorId) as { median: number | null } | undefined;
   return Math.round(row?.median ?? 0);
-}
-
-export function recordCompetitorAlert(a: {
-  competitor_id: number;
-  video_id: string;
-  title?: string | null;
-  thumbnail_url?: string | null;
-  views?: number | null;
-  channel_median_views?: number | null;
-  multiplier?: number | null;
-}): void {
-  db.prepare(
-    `INSERT INTO competitor_alerts
-       (competitor_id, video_id, title, thumbnail_url, views, channel_median_views, multiplier)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(competitor_id, video_id) DO UPDATE SET
-       views = excluded.views,
-       multiplier = excluded.multiplier,
-       channel_median_views = excluded.channel_median_views`
-  ).run(
-    a.competitor_id,
-    a.video_id,
-    a.title ?? null,
-    a.thumbnail_url ?? null,
-    a.views ?? null,
-    a.channel_median_views ?? null,
-    a.multiplier ?? null
-  );
-}
-
-export function listCompetitorAlerts(
-  opts: {
-    unreadOnly?: boolean;
-    userChannelId?: string | null;
-  } = {}
-): (CompetitorAlert & {
-  competitor_title: string | null;
-  competitor_handle: string | null;
-  competitor_tier: CompetitorTier;
-  published_at: number | null;
-})[] {
-  const whereParts: string[] = ["e.video_id IS NULL"];
-  const args: (string | number | null)[] = [];
-  if (opts.unreadOnly) whereParts.push("a.read_at IS NULL");
-  if (opts.userChannelId) {
-    whereParts.push("c.user_channel_id = ?");
-    args.push(opts.userChannelId);
-  }
-  const where = `WHERE ${whereParts.join(" AND ")}`;
-  // LEFT JOIN competitor_videos so the upload date travels with each alert.
-  // detected_at stays (still useful internally — sorting + alert age tracking)
-  // but the UI labels it as upload date by reading published_at.
-  // competitor_tier travels with the row so the Recent tab can show the
-  // same B&S tier pill that Library does.
-  //
-  // LEFT JOIN competitor_video_excludes + IS NULL filter suppresses any
-  // alert the user has hidden under THIS competitor's owning user_channel.
-  // No LIMIT clause — RecentTab + chat tool both want the full set; a real
-  // pagination story is deferred to a future PR.
-  return db
-    .prepare(
-      `SELECT a.*,
-              c.title  AS competitor_title,
-              c.handle AS competitor_handle,
-              c.tier   AS competitor_tier,
-              cv.published_at AS published_at
-       FROM competitor_alerts a
-       JOIN competitors c ON c.id = a.competitor_id
-       LEFT JOIN competitor_videos cv
-         ON cv.competitor_id = a.competitor_id
-        AND cv.video_id      = a.video_id
-       LEFT JOIN competitor_video_excludes e
-         ON e.user_channel_id = c.user_channel_id
-        AND e.video_id        = a.video_id
-       ${where}
-       ORDER BY a.detected_at DESC`
-    )
-    .all(...args) as (CompetitorAlert & {
-    competitor_title: string | null;
-    competitor_handle: string | null;
-    competitor_tier: CompetitorTier;
-    published_at: number | null;
-  })[];
-}
-
-export function markCompetitorAlertRead(id: number): void {
-  db.prepare(
-    `UPDATE competitor_alerts SET read_at = strftime('%s','now') WHERE id = ?`
-  ).run(id);
-}
-
-export function unreadCompetitorAlertCount(
-  userChannelId?: string | null
-): number {
-  // LEFT JOIN competitor_video_excludes + IS NULL keeps the sidebar
-  // badge consistent with what Recent actually renders — hidden rows
-  // never contribute to the unread count, even if their read_at is
-  // null.
-  if (userChannelId) {
-    const row = db
-      .prepare(
-        `SELECT COUNT(*) AS n
-         FROM competitor_alerts a
-         JOIN competitors c ON c.id = a.competitor_id
-         LEFT JOIN competitor_video_excludes e
-           ON e.user_channel_id = c.user_channel_id
-          AND e.video_id        = a.video_id
-         WHERE a.read_at IS NULL
-           AND c.user_channel_id = ?
-           AND e.video_id IS NULL`
-      )
-      .get(userChannelId) as { n: number };
-    return row.n;
-  }
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS n
-       FROM competitor_alerts a
-       JOIN competitors c ON c.id = a.competitor_id
-       LEFT JOIN competitor_video_excludes e
-         ON e.user_channel_id = c.user_channel_id
-        AND e.video_id        = a.video_id
-       WHERE a.read_at IS NULL
-         AND e.video_id IS NULL`
-    )
-    .get() as { n: number };
-  return row.n;
 }
 
 /**
