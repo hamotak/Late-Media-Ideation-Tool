@@ -1,4 +1,4 @@
-# Lat Media Ideation Tool
+# Late Media Ideation Tool
 
 Lat Media Ideation Tool is an internal YouTube workflow app for turning channel context, competitor signals, recent performance, and thumbnail references into better video ideas and thumbnail directions.
 
